@@ -1,51 +1,127 @@
 # Billiards-solo
 
-离线桌面台球（八球 + 斯诺克）人机对战。Python + pygame，纯本地运行，**无网络**。
+Offline 8-ball & snooker vs-AI — as a **zero-dependency offline web page** *and* a pygame desktop app.
 
-这是一个对 [bloob.io](https://bloob.io) 八球 / 斯诺克「人机对局」的**逆向工程学习项目**：
-分析其前端实现以提取物理常量与 bot 启发式，再**从零重写**实现（不搬运其混淆源码）。
+A reverse-engineering study of [bloob.io](https://bloob.io)'s human-vs-bot play: analyse the front end to
+extract physics constants and bot heuristics, then **reimplement everything from scratch** (no obfuscated
+source or art is copied).
 
-> Offline desktop billiards (8-ball & snooker) vs-AI. A reverse-engineering study of
-> bloob.io's human-vs-bot play, reimplemented from scratch in Python/pygame.
+![Menu](docs/screenshots/menu.png)
 
-## 技术栈
-- Python 3.11+ · pygame（2D 渲染，全本地）
-- 确定性步进的物理引擎（自写：圆-圆弹性碰撞、库边反弹、指数摩擦、袋口判定）
-- 人机 AI：幽灵球（ghost-ball）候选枚举 + 路径贯通检查 + 自写模拟 + 评分选杆
+## Play — offline web (recommended)
 
-## 运行
+No install, no local server, no network:
+
+1. Open **`web/index.html`** in any modern browser (double-click it).
+2. Pick **8-BALL** or **SNOOKER** and a difficulty.
+3. Play against the built-in bot.
+
+| 8-Ball | Snooker |
+|---|---|
+| ![8-ball](docs/screenshots/8ball.png) | ![snooker](docs/screenshots/snooker.png) |
+
+### Controls
+- **Ball-in-hand** — click/tap inside the allowed area to place the cue ball.
+- **Aim & shoot** — press & hold, drag **away** from the cue (slingshot), release. Pull distance = power;
+  the shot travels opposite the drag.
+- **R / Esc** — back to the menu.
+
+### Why it really is offline
+- Plain classic `<script>` tags (no ES modules), so opening the file via `file://` works — **no `http.server` needed**.
+- No network requests, no accounts, no cookies, no `localStorage`.
+
+## Desktop version (pygame)
+
+The original desktop build keeps the identical logic in Python:
+
 ```bash
 pip install -r requirements.txt
 python src/main.py
 ```
-- 菜单选择 **八球 / 斯诺克** 与难度（easy / medium / hard）。
-- **自由球（ball-in-hand）**：点击台面允许区域放置母球。
-- **瞄准/出杆**：按住左键并**向后拖拽**（弹弓式），松开击球；拖拽距离 = 力度，方向为拖拽反方向。
-- **R / Esc**：返回菜单。
 
-## 逆向工程结论（要点）
-详见 `docs/REA_findings.md`。关键事实：
-- bloob 为 Vue 3 + Pinia + rolldown 的闭源 SPA；物理 + bot 引擎**不在静态部署中**（进房时按需加载 / 强混淆），无法静态定位。
-- 已提取的**常量**（在 `physics.py` 中复刻）：8 球球半径 11 / 袋半径 11；斯诺克球半径 8.5 / 袋半径 5；质量 3；球-球弹性 0.9、球-库 0.75；无重力；休眠速度 5。
-- 规则层（球组枚举、犯规枚举、胜负判定、斯诺克计分）按 bloob 的 `poolRackLogic` 与标准规则重写。
+Same menu, controls and rules as the web build.
 
-> **建模说明**：bloob 的 `damping`(0.45) 与 `solverIterations` 等仅出现在配置块、引擎不按字面读取这些键，
-> 因此摩擦模型采用标准「每秒指数衰减」(`v *= exp(-0.45·t)`) 复刻；而 bloob 字面 `hole.radius`(5/11)
-> 小于球半径、对准精度下几乎无法落袋，故落袋捕获半径放宽为 **1.5× 球半径**以保证可玩（见 `physics.py` 注释）。
+## Layout
 
-## 范围 / 进度
-- [x] 仓库与离线骨架
-- [x] REA recon：定位并下载 bloob 前端 JS 包（存于 `artifacts/`，已被 `.gitignore` 排除，**不入库**）
-- [x] REA 静态分析：物理常量 + 规则枚举（`docs/REA_findings.md`）
-- [x] 物理引擎：碰撞 / 摩擦 / 袋口 / 确定性步进（`src/physics.py`）
-- [x] 八球（WPA/UPA 风格）规则 + 人机 AI（`src/rules_eightball.py`）
-- [x] 斯诺克规则 + 人机 AI（`src/rules_snooker.py`）
-- [x] 共享 bot（`src/bot.py`）+ pygame 界面 / 菜单 / 输入 / 渲染（`src/main.py`）
-- [x] 离线运行验证（8 球、斯诺克均可完整打完一局）
+```
+web/                     offline web page — Canvas 2D, zero dependencies
+  index.html
+  css/style.css
+  js/physics.js          deterministic top-down physics
+  js/rules8ball.js       8-ball state machine (groups, fouls, win/loss)
+  js/rulesSnooker.js     snooker state machine (reds/colours, re-spot, scoring)
+  js/bot.js              ghost-ball AI (path clearance + cloned-world simulation)
+  js/app.js              Canvas UI (menu, aim, HUD, turn flow)
+src/                     pygame desktop build (same logic in Python)
+docs/REA_findings.md     reverse-engineering findings & modelling decisions
+```
 
-## 声明 / Disclaimer
-本项目仅作学习与工程练习。玩法思路源自 bloob.io（Kinglet Code，闭源产品），
-但**全部代码为独立重写**，不包含 bloob 的专有源码或美术资源。
+## How the AI works
+
+For every legal target ball × pocket it computes the **ghost-ball** contact point, checks that both the
+cue→ghost and target→pocket paths are clear, simulates the shot on a clone of the world, and scores the
+outcome. It picks the best makeable pot, or plays a safety when none exists. Difficulty tiers change aim
+noise and search depth. The physics is framework-agnostic, so the bot runs headless.
+
+## Physics & rules highlights
+
+- Deterministic top-down 2D physics: circle-circle elastic impulses, circle-segment cushion reflection,
+  exponential friction, and **segment-based pocket capture** (so fast balls can't tunnel past a pocket).
+- Ball-ball restitution `0.9`, ball-cushion `0.75`, mass `3`, sleep speed `5`, `20` solver iterations —
+  constants extracted from bloob (see `docs/REA_findings.md`).
+- Standard 8-ball: open table, group assignment, the meaningful foul set, premature-8 = loss, legal-8 = win.
+- Standard snooker: 15 reds + 6 colours, red→colour scoring, colour re-spotting, ascending end-game order,
+  foul penalty = `max(4, value of ball first hit, value of ball potted)`.
+
+> **Modelling note (playability):** bloob's literal `hole.radius` (5 / 11) is smaller than the ball, so a
+> shot aimed at a pocket would miss. Capture radius is relaxed to **1.5× ball radius**, and the friction
+> model uses the standard per-second exponential decay (`v *= exp(-0.45·t)`) since the exact integration
+> model is not statically reachable. Both decisions are documented in `physics.py` / `docs/REA_findings.md`.
+
+## Fixed while porting to the web
+
+The JavaScript port surfaced three genuine bugs that also affected the Python build; all are fixed in both:
+
+1. **Balls could leave the table.** A fast ball could thread a sliver of a corner-pocket gap (gap diagonal
+   slightly exceeds the capture radius), then fly off to infinity — simulations never settled. A hard
+   containment safety net now captures out-of-bounds balls near a pocket and clamps/bounces anything else.
+2. **The snooker cue ball started on the brown spot**, overlapping it and blocking every pot. The cue now
+   starts offset inside the D.
+3. **The red triangle was inverted**, so its wide back row overlapped the blue ball. The apex now faces the
+   baulk end and the pack widens toward black.
+
+## Verification
+
+- **Logic (Node, headless): 14/14** — physics settles; a full 8-ball frame completes; **no ball ever leaves
+  the table**; snooker reds decrement consistently; colours pot in ascending order.
+- **UI wiring (headless DOM/Canvas): 20/20** — menu → start → place → aim → shoot → resolve → bot turn, for
+  both modes, plus the game-over overlay.
+- Screenshots above are real renders captured with headless Chrome.
+
+## Scope / progress
+
+- [x] Repo & offline skeleton
+- [x] REA recon + static analysis (`docs/REA_findings.md`)
+- [x] Physics engine (Python + JS)
+- [x] 8-ball rules + AI
+- [x] Snooker rules + AI
+- [x] pygame desktop UI
+- [x] **Zero-dependency offline web build (Canvas 2D)**
+- [x] Offline verification: 8-ball and snooker can be played to completion
+
+## Disclaimer
+
+Learning / engineering exercise. Gameplay inspiration comes from bloob.io (Kinglet Code, closed source);
+**all code here is independently rewritten** and contains no bloob proprietary source or art.
 
 ---
+
+## 中文简介
+
+离线八球 / 斯诺克人机对战。现在提供**零依赖离线网页**：直接双击 `web/index.html` 即可在浏览器里玩，
+无需安装、无需本地服务器、全程无网络。原有 `src/`（Python + pygame）桌面版逻辑完全一致，保留可用。
+逆向结论、建模决策与三处移植中修复的 bug 见上文与 `docs/REA_findings.md`。
+
+---
+
 MIT License © 2026 Franky100-pig
