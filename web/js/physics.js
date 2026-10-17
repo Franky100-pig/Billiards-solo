@@ -36,6 +36,7 @@ const RESTITUTION_CUSHION = 0.75;
 const DAMPING = 0.45;            // per-second exponential linear decay (modeled)
 const SLEEP_SPEED = 5.0;         // u/s; below this a ball is parked
 const SOLVER_ITER = 20;
+const TWO_PI = Math.PI * 2.0;
 
 // --- geometry helpers ----------------------------------------------------
 function _closestPointOnSegment(px, py, ax, ay, bx, by) {
@@ -66,6 +67,13 @@ class Ball {
     this.pocketed = false;
     this.number = number;
     this.kind = kind; // "cue","solid","stripe","eight","red","color"
+    // Presentation-only state for the rolling animation. `angle` is the angle
+    // the ball has rolled through (radians, v*h/r accumulated) and (dirx,diry)
+    // is the last direction it travelled in, so the renderer can slide the
+    // painted pattern over the sphere. Never read by the rules or the bot.
+    this.angle = 0.0;
+    this.dirx = 1.0;
+    this.diry = 0.0;
   }
   speed() {
     return Math.hypot(this.vx, this.vy);
@@ -73,6 +81,7 @@ class Ball {
   clone() {
     const b = new Ball(this.x, this.y, this.radius, this.mass, this.number, this.kind);
     b.vx = this.vx; b.vy = this.vy; b.pocketed = this.pocketed;
+    b.angle = this.angle; b.dirx = this.dirx; b.diry = this.diry;
     return b;
   }
 }
@@ -135,10 +144,22 @@ class World {
       b.px = b.x; b.py = b.y;
       b.x += b.vx * h;
       b.y += b.vy * h;
+      const sp = Math.hypot(b.vx, b.vy);
+      if (sp > 1e-6) {
+        // rolling without slipping: d(theta) = ds / r
+        b.angle += (sp * h) / b.radius;
+        if (b.angle > TWO_PI) b.angle -= TWO_PI;
+        b.dirx = b.vx / sp;
+        b.diry = b.vy / sp;
+      }
       b.vx *= decay;
       b.vy *= decay;
       if (b.speed() < this.sleep_speed) {
         b.vx = 0.0; b.vy = 0.0;
+        // Settle the painted pattern face-up. A ball rolls through arbitrary
+        // angles, so without this a ball can come to rest with its number
+        // pointing at the floor and stay unreadable for the rest of the frame.
+        b.angle = Math.round(b.angle / TWO_PI) * TWO_PI;
       }
     }
     const iters = Math.max(1, Math.floor(SOLVER_ITER / 10));

@@ -17,9 +17,11 @@ const HUD_TOP = 78, HUD_BOTTOM = 56;
 const RAIL = 26;
 const ANIM_H = 1.0 / 360.0;
 const SUBSTEPS_PER_FRAME = 16;
-const MAX_LAUNCH = 2000.0;
-const MIN_LAUNCH = 160.0;
-const MAX_DRAG = 230.0;
+// Stroke speeds match the physics: a ball launched at v coasts v / DAMPING
+// (~0.45) table units, so 1350 crosses the table three times and 70 is a tap.
+const MAX_LAUNCH = 1350.0;
+const MIN_LAUNCH = 70.0;
+const MAX_DRAG = 205.0;
 
 // 8-ball colours (number -> rgb); 9-15 reuse 1-7 as stripes
 const EIGHT_COLORS = {
@@ -92,9 +94,15 @@ class App {
     this.await_place = false;
     this.pending_bot = false;
     this.bot_think_frames = 0;
+    this.bot_aim = null;        // [angle, power] the bot has settled on
     this.aim_angle = 0.0;
     this.power = 0.0;
     this.overBtn = null;
+    // strike animation: the cue snaps through the ball, then fades
+    this.strike_t = 0.0;
+    this.strike_from = null;
+    this.strike_angle = 0.0;
+    this.strike_power = 0.0;
 
     this._buildMenu();
     this._bindInput();
@@ -141,9 +149,12 @@ class App {
     this.pulling = false;
     this.pending_bot = false;
     this.bot_think_frames = 0;
+    this.bot_aim = null;
     this.power = 0.0;
     this.aim_angle = 0.0;
     this.overBtn = null;
+    this.strike_t = 0.0;
+    this.strike_from = null;
     this.await_place = !!this.game.ball_in_hand;
   }
 
@@ -208,11 +219,24 @@ class App {
   onRelease(pos) {
     if (this.phase !== "play" || !this.pulling) return;
     this.pulling = false;
-    if (this.power < MIN_LAUNCH * 0.5) return;
+    if (this.power < MIN_LAUNCH * 0.6) { this.power = 0.0; return; }
+    if (this.game.cue() === null) return;
+    this._strike(this.aim_angle, this.power);
+    this.power = 0.0;
+  }
+
+  /** Fire the cue ball and start the strike animation. */
+  _strike(angle, power) {
     const cue = this.game.cue();
-    if (cue === null) return;
-    this.game.launch(this.aim_angle, this.power);
+    this.strike_from = cue ? [cue.x, cue.y] : null;
+    this.strike_angle = angle;
+    this.strike_power = power;
+    this.strike_t = 1.0;
+    this.game.launch(angle, power);
     this.simulating = true;
+    this.pending_bot = false;
+    this.bot_aim = null;
+    this.await_place = false;
   }
 
   _humanTurn() { return this.game.current === 0; }
@@ -226,8 +250,10 @@ class App {
     const dist = Math.hypot(dx, dy);
     if (dist < 4) { this.power = 0.0; return; }
     this.aim_angle = Math.atan2(-dy, -dx);
-    this.power = Math.min(MAX_LAUNCH, (Math.min(dist, MAX_DRAG) / MAX_DRAG) * MAX_LAUNCH);
-    if (this.power < MIN_LAUNCH) this.power = MIN_LAUNCH;
+    // gamma curve: the first part of the drag stays gentle so soft touches
+    // are easy to hit, and only the last stretch reaches a full stroke
+    const frac = Math.min(1.0, dist / MAX_DRAG);
+    this.power = MIN_LAUNCH + Math.pow(frac, 1.35) * (MAX_LAUNCH - MIN_LAUNCH);
   }
 
   // -- turn flow ---------------------------------------------------------
@@ -238,19 +264,19 @@ class App {
     if (g.current === 1) {
       this.pending_bot = true;
       this.bot_think_frames = 0;
+      this.bot_aim = null;
     } else {
       this.pending_bot = false;
     }
   }
 
-  doBotTurn() {
+  doBotTurn(pre = null) {
     const g = this.game;
-    if (g.ball_in_hand) g.auto_place_cue();
-    const ap = chooseShot(g, this.difficulty);
-    g.launch(ap[0], ap[1]);
-    this.simulating = true;
-    this.pending_bot = false;
-    this.await_place = false;
+    if (!pre) {
+      if (g.ball_in_hand) g.auto_place_cue();
+      pre = chooseShot(g, this.difficulty);
+    }
+    this._strike(pre[0], pre[1]);
   }
 
   // -- loop --------------------------------------------------------------
@@ -272,6 +298,7 @@ class App {
   tick() {
     if (this.phase !== "play") return;
     this._updatePull();
+    if (this.strike_t > 0) this.strike_t = Math.max(0.0, this.strike_t - 0.26);
     if (this.simulating) {
       for (let i = 0; i < SUBSTEPS_PER_FRAME; i++) {
         this.game.world.advance(ANIM_H);
@@ -284,7 +311,12 @@ class App {
       }
     } else if (this.pending_bot) {
       this.bot_think_frames++;
-      if (this.bot_think_frames > 8) this.doBotTurn();
+      // think, show the cue at the chosen line for a moment, then strike
+      if (this.bot_think_frames >= 6 && this.bot_aim === null) {
+        if (this.game.ball_in_hand) this.game.auto_place_cue();
+        this.bot_aim = chooseShot(this.game, this.difficulty);
+      }
+      if (this.bot_think_frames > 20) this.doBotTurn(this.bot_aim);
     }
   }
 
@@ -300,6 +332,17 @@ class App {
       this._renderBalls();
       if (this.phase === "play" && this._humanTurn() && !this.simulating && !this.await_place) {
         this._renderAim();
+      } else if (this.simulating && this.strike_t > 0 && this.strike_from) {
+        this._renderStrike();
+      } else if (this.phase === "play" && this.pending_bot && this.bot_aim
+                 && this.bot_think_frames > 8) {
+        // let the player watch the bot line up its shot
+        const cue = this.game.cue();
+        if (cue) {
+          const [bx, by] = this.w2s(cue.x, cue.y);
+          const r = Math.max(4, cue.radius * this.scale);
+          this._renderCue(bx, by, this.bot_aim[0], r * 2.0, 0.9);
+        }
       }
       this._renderHud();
       if (this.phase === "over") this._renderOver();
@@ -375,58 +418,17 @@ class App {
       WIN_W / 2, WIN_H - 26, 12, "#6d7480", "center", 400);
   }
 
-  _renderTable() {
-    if (this.snooker) { this._renderSnookerTable(); return; }
-    const ctx = this.ctx;
-    const w = this.game.world;
-    const [x0, y0] = this.w2s(0, 0);
-    const tw = w.width * this.scale, th = w.height * this.scale;
-
-    // drop shadow + rail
-    ctx.save();
-    ctx.shadowColor = "rgba(0,0,0,.45)";
-    ctx.shadowBlur = 26;
-    ctx.shadowOffsetY = 10;
-    ctx.fillStyle = "#165c2e";
-    this._roundRect(x0 - RAIL, y0 - RAIL, tw + 2 * RAIL, th + 2 * RAIL, 12);
-    ctx.fill();
-    ctx.restore();
-
-    // cloth
-    ctx.fillStyle = "#0f4623";
-    ctx.fillRect(x0, y0, tw, th);
-
-    // subtle cloth sheen
-    const sh = ctx.createLinearGradient(x0, y0, x0, y0 + th);
-    sh.addColorStop(0, "rgba(255,255,255,.045)");
-    sh.addColorStop(0.5, "rgba(0,0,0,0)");
-    sh.addColorStop(1, "rgba(0,0,0,.10)");
-    ctx.fillStyle = sh;
-    ctx.fillRect(x0, y0, tw, th);
-
-    // pockets
-    for (const [px, py] of w.pockets) {
-      const [sx, sy] = this.w2s(px, py);
-      const pr = Math.max(7, w.pocket_radius * this.scale);
-      ctx.fillStyle = "#070707";
-      ctx.beginPath(); ctx.arc(sx, sy, pr, 0, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = "rgba(0,0,0,.65)";
-      ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(sx, sy, pr, 0, Math.PI * 2); ctx.stroke();
-    }
-  }
-
   /**
-   * Standard snooker table: mahogany body, green baize, cushion band, baulk
-   * line + D, the six spots, and corner pockets larger than the middles.
+   * Shared table body: mahogany rail, bevelled edge, brass sight markers,
+   * rubber cushion band, baize with a sheen and the inner shadow where the
+   * cloth meets the cushions. Both modes are built on this so the two tables
+   * belong to the same set of furniture.
    */
-  _renderSnookerTable() {
+  _drawTableBody(rail, cush) {
     const ctx = this.ctx;
     const w = this.game.world;
     const [x0, y0] = this.w2s(0, 0);
     const tw = w.width * this.scale, th = w.height * this.scale;
-    const rail = RAIL + 8;
-    const cush = Math.max(10, 17 * this.scale);
 
     // --- mahogany body ---------------------------------------------------
     ctx.save();
@@ -452,7 +454,7 @@ class App {
       tw + 2 * rail - 3, th + 2 * rail - 3, 15);
     ctx.stroke();
 
-    // brass-ish sight markers along the rails (nice, cheap detail)
+    // brass sight markers along the rails
     ctx.fillStyle = "rgba(214,178,110,.55)";
     for (const f of [0.25, 0.5, 0.75]) {
       const sx = x0 + tw * f;
@@ -461,7 +463,7 @@ class App {
       }
     }
 
-    // --- cushion band (rubber, lighter than the cloth, dark shadow line) --
+    // --- cushion band ----------------------------------------------------
     ctx.fillStyle = "#24955c";
     ctx.fillRect(x0 - cush, y0 - cush, tw + 2 * cush, th + 2 * cush);
     ctx.strokeStyle = "rgba(255,255,255,.10)";
@@ -494,44 +496,86 @@ class App {
     ctx.fillStyle = sh;
     ctx.fillRect(x0, 0, tw, 12);
     ctx.restore();
+  }
 
-    // --- markings: baulk line, D, spots ----------------------------------
-    const bx = this.ox + w.width * SNOOKER_BAULK_X * this.scale;
-    const dr = w.height * SNOOKER_D_RADIUS * this.scale;
-    const cys = y0 + th / 2;
-    ctx.strokeStyle = "rgba(238,240,228,.40)";
-    ctx.lineWidth = 1.6;
-    ctx.beginPath(); ctx.moveTo(bx, y0); ctx.lineTo(bx, y0 + th); ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(bx, cys, dr, Math.PI / 2, Math.PI * 1.5);   // bulge toward baulk
-    ctx.stroke();
+  _renderTable() {
+    const ctx = this.ctx;
+    const w = this.game.world;
+    const [x0, y0] = this.w2s(0, 0);
+    const tw = w.width * this.scale, th = w.height * this.scale;
 
-    const spots = snookerSpots(w.width, w.height);
-    ctx.fillStyle = "rgba(238,240,228,.50)";
-    for (const key of Object.keys(spots.colors)) {
-      const [wx, wy] = spots.colors[key];
-      const [sx, sy] = this.w2s(wx, wy);
-      ctx.beginPath(); ctx.arc(sx, sy, 2.2, 0, Math.PI * 2); ctx.fill();
+    if (this.snooker) {
+      this._drawTableBody(RAIL + 8, Math.max(10, 17 * this.scale));
+    } else {
+      this._drawTableBody(RAIL - 2, Math.max(9, 14 * this.scale));
     }
 
-    // --- pockets ---------------------------------------------------------
+    if (this.snooker) {
+      // --- markings: baulk line, D, spots --------------------------------
+      const bx = this.ox + w.width * SNOOKER_BAULK_X * this.scale;
+      const dr = w.height * SNOOKER_D_RADIUS * this.scale;
+      const cys = y0 + th / 2;
+      ctx.strokeStyle = "rgba(238,240,228,.40)";
+      ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.moveTo(bx, y0); ctx.lineTo(bx, y0 + th); ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(bx, cys, dr, Math.PI / 2, Math.PI * 1.5);   // bulge toward baulk
+      ctx.stroke();
+
+      const spots = snookerSpots(w.width, w.height);
+      ctx.fillStyle = "rgba(238,240,228,.50)";
+      for (const key of Object.keys(spots.colors)) {
+        const [wx, wy] = spots.colors[key];
+        const [sx, sy] = this.w2s(wx, wy);
+        ctx.beginPath(); ctx.arc(sx, sy, 2.2, 0, Math.PI * 2); ctx.fill();
+      }
+
+      // --- pockets: corners bigger than the middles ----------------------
+      const cr = w.capture_radius * this.scale;
+      for (let i = 0; i < w.pockets.length; i++) {
+        const [sx, sy] = this.w2s(w.pockets[i][0], w.pockets[i][1]);
+        const middle = (i === 1 || i === 4);
+        const pr = (middle ? 0.80 : 1.05) * cr;
+        const pg = ctx.createRadialGradient(sx, sy, pr * 0.15, sx, sy, pr);
+        pg.addColorStop(0, "#000000");
+        pg.addColorStop(0.72, "#050d08");
+        pg.addColorStop(1, "#123024");
+        ctx.fillStyle = pg;
+        ctx.beginPath(); ctx.arc(sx, sy, pr, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = "rgba(28,16,8,.85)";
+        ctx.lineWidth = 2.5;
+        ctx.beginPath(); ctx.arc(sx, sy, pr + 1.2, 0, Math.PI * 2); ctx.stroke();
+      }
+      return;
+    }
+
+    // --- 8-ball pockets: six leather-lined jaws, corners a touch wider ---
     const cr = w.capture_radius * this.scale;
     for (let i = 0; i < w.pockets.length; i++) {
       const [sx, sy] = this.w2s(w.pockets[i][0], w.pockets[i][1]);
       const middle = (i === 1 || i === 4);
-      const pr = (middle ? 0.80 : 1.05) * cr;
-      // mouth
+      const pr = (middle ? 0.86 : 1.10) * cr;
       const pg = ctx.createRadialGradient(sx, sy, pr * 0.15, sx, sy, pr);
       pg.addColorStop(0, "#000000");
-      pg.addColorStop(0.72, "#050d08");
-      pg.addColorStop(1, "#123024");
+      pg.addColorStop(0.70, "#060606");
+      pg.addColorStop(1, "#1a2b1f");
       ctx.fillStyle = pg;
       ctx.beginPath(); ctx.arc(sx, sy, pr, 0, Math.PI * 2); ctx.fill();
-      // leather rim
-      ctx.strokeStyle = "rgba(28,16,8,.85)";
+      ctx.strokeStyle = "rgba(26,14,6,.85)";
       ctx.lineWidth = 2.5;
       ctx.beginPath(); ctx.arc(sx, sy, pr + 1.2, 0, Math.PI * 2); ctx.stroke();
     }
+
+    // head string, as on a real pool table
+    const hx = this.ox + w.width * 0.25 * this.scale;
+    ctx.strokeStyle = "rgba(238,240,228,.20)";
+    ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.moveTo(hx, y0); ctx.lineTo(hx, y0 + th); ctx.stroke();
+    const fsx = this.ox + w.width * 0.75 * this.scale;
+    ctx.fillStyle = "rgba(238,240,228,.42)";
+    ctx.beginPath(); ctx.arc(fsx, y0 + th / 2, 2.2, 0, Math.PI * 2); ctx.fill();
+
+    void x0;
   }
 
   _drawBall(b) {
@@ -540,6 +584,42 @@ class App {
     const r = Math.max(4, b.radius * this.scale);
     const info = ballColor(b, this.snooker);
     const fill = rgb(info.fill);
+
+    // As a ball dies, let its pattern settle face-up. The physics snaps the
+    // roll angle once the ball is parked; this eases the last few degrees
+    // while it is still creeping so the number fades back in smoothly.
+    if (b.speed() < 45 && b.angle !== 0) {
+      const rem = ((b.angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+      const target = rem > Math.PI ? Math.PI * 2 : 0;
+      b.angle += (target - rem) * 0.18;
+      if (Math.abs(target - rem) < 1e-3) b.angle = target;
+    }
+
+    // --- motion streak: a tapered comet tail behind the ball ------------
+    const sp = b.speed();
+    if (sp > 90) {
+      const len = Math.min(r * 4.6, sp * 0.040) * (r / 11 + 0.55);
+      const ux = b.dirx, uy = b.diry;
+      const pxx = -uy, pyy = ux;                 // perpendicular
+      const a = Math.min(0.32, (sp - 90) / 1500);
+      // start the tail at the ball's far edge so it never covers the ball
+      const nx = sx - ux * r * 0.55, ny = sy - uy * r * 0.55;
+      const tx = sx - ux * (r * 0.55 + len), ty = sy - uy * (r * 0.55 + len);
+      const w0 = r * 0.86;                       // half-width at the ball
+      const tg = ctx.createLinearGradient(nx, ny, tx, ty);
+      tg.addColorStop(0.00, `rgba(${info.fill[0]},${info.fill[1]},${info.fill[2]},${a})`);
+      tg.addColorStop(0.45, `rgba(${info.fill[0]},${info.fill[1]},${info.fill[2]},${a * 0.45})`);
+      tg.addColorStop(1.00, `rgba(${info.fill[0]},${info.fill[1]},${info.fill[2]},0)`);
+      ctx.save();
+      ctx.fillStyle = tg;
+      ctx.beginPath();
+      ctx.moveTo(nx + pxx * w0, ny + pyy * w0);
+      ctx.lineTo(tx, ty);
+      ctx.lineTo(nx - pxx * w0, ny - pyy * w0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
 
     // contact shadow on the cloth
     ctx.beginPath();
@@ -557,6 +637,20 @@ class App {
       g.addColorStop(1.00, shade(info.fill, -0.46));
       ctx.beginPath(); ctx.arc(sx, sy, r, 0, Math.PI * 2);
       ctx.fillStyle = g; ctx.fill();
+
+      // rolling read: a fat, faint sheen that sweeps around as it turns
+      const ca = Math.cos(b.angle), sa = Math.sin(b.angle);
+      if (ca > 0.05) {
+        ctx.save();
+        ctx.beginPath(); ctx.arc(sx, sy, r * 0.995, 0, Math.PI * 2); ctx.clip();
+        ctx.globalAlpha = 0.09 * ca;
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        ctx.ellipse(sx + b.dirx * sa * r * 0.62, sy + b.diry * sa * r * 0.62,
+          r * 0.46, r * 0.30, Math.atan2(b.diry, b.dirx), 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
 
       // specular glint
       ctx.beginPath();
@@ -599,17 +693,34 @@ class App {
     ctx.beginPath(); ctx.arc(sx, sy, r, 0, Math.PI * 2);
     ctx.strokeStyle = "rgba(0,0,0,.55)"; ctx.lineWidth = 1; ctx.stroke();
 
-    // number disc (8-ball only)
+    // --- number patch (8-ball): rides the sphere as it rolls ------------
+    // The patch is painted at the ball's pole. Rolling tips that pole forward
+    // by `angle`, so on screen it slides along the direction of travel by
+    // r*sin(angle), squashes by cos(angle), and vanishes once it has tipped
+    // past the horizon on the far side.
     if (!this.snooker && b.kind !== "cue") {
-      const dr = r * 0.46;
-      ctx.beginPath(); ctx.arc(sx, sy, dr, 0, Math.PI * 2);
-      ctx.fillStyle = "#f4f4f4"; ctx.fill();
-      ctx.strokeStyle = "rgba(0,0,0,.22)"; ctx.lineWidth = 1; ctx.stroke();
-      ctx.fillStyle = "#141414";
-      ctx.font = `700 ${Math.max(7, r * 0.8)}px -apple-system, system-ui, sans-serif`;
-      ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      ctx.fillText(String(b.number), sx, sy + 0.5);
-      ctx.textBaseline = "alphabetic";
+      const ca = Math.cos(b.angle), sa = Math.sin(b.angle);
+      if (ca > 0.06) {
+        const dr = r * 0.46;
+        const ox = sx + b.dirx * sa * r * 0.90;
+        const oy = sy + b.diry * sa * r * 0.90;
+        const rot = Math.atan2(b.diry, b.dirx);
+        ctx.save();
+        ctx.beginPath(); ctx.arc(sx, sy, r * 0.99, 0, Math.PI * 2); ctx.clip();
+        ctx.beginPath();
+        ctx.ellipse(ox, oy, dr * ca, dr, rot, 0, Math.PI * 2);
+        ctx.fillStyle = "#f4f4f4"; ctx.fill();
+        ctx.strokeStyle = "rgba(0,0,0,.20)"; ctx.lineWidth = 1; ctx.stroke();
+        if (ca > 0.34) {
+          ctx.fillStyle = "#141414";
+          ctx.font = `700 ${Math.max(6, r * 0.78 * Math.sqrt(ca))}px `
+            + `-apple-system, system-ui, sans-serif`;
+          ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          ctx.fillText(String(b.number), ox, oy + 0.5);
+          ctx.textBaseline = "alphabetic";
+        }
+        ctx.restore();
+      }
     }
   }
 
@@ -620,42 +731,309 @@ class App {
     }
   }
 
-  _renderAim() {
-    const ctx = this.ctx;
-    const cue = this.game.cue();
-    if (cue === null) return;
-    const [cx, cy] = this.w2s(cue.x, cue.y);
-    const ang = this.aim_angle;
+  // -- aiming, shot line, cue -------------------------------------------
+  /**
+   * What the cue ball meets first travelling along `ang`: another ball
+   * (contact point at 2r, i.e. the ghost ball) or a cushion. Pure geometry
+   * so the aim line redraws instantly every frame.
+   */
+  _firstHit(cue, ang) {
+    const w = this.game.world;
+    const r = w.ball_radius;
+    const ux = Math.cos(ang), uy = Math.sin(ang);
+    let best = null;
+    for (const b of w.balls) {
+      if (b.pocketed || b.kind === "cue") continue;
+      const ox = b.x - cue.x, oy = b.y - cue.y;
+      const proj = ox * ux + oy * uy;
+      if (proj <= 0) continue;
+      const perp2 = ox * ox + oy * oy - proj * proj;
+      const R = 2 * r;
+      if (perp2 > R * R) continue;
+      const t = proj - Math.sqrt(R * R - perp2);
+      if (t < 0) continue;
+      if (best === null || t < best.t) best = { t, ball: b };
+    }
+    let tw = Infinity;
+    if (ux > 1e-9) tw = Math.min(tw, (w.width - r - cue.x) / ux);
+    if (ux < -1e-9) tw = Math.min(tw, (r - cue.x) / ux);
+    if (uy > 1e-9) tw = Math.min(tw, (w.height - r - cue.y) / uy);
+    if (uy < -1e-9) tw = Math.min(tw, (r - cue.y) / uy);
+    if (best === null || tw < best.t) return { t: Math.max(0.0, tw), ball: null };
+    return best;
+  }
 
-    // forward aim line (dashed)
-    const ex = cx + Math.cos(ang) * 340, ey = cy + Math.sin(ang) * 340;
+  _ballLineColor(b) {
+    const info = ballColor(b, this.snooker);
+    return `rgba(${info.fill[0]},${info.fill[1]},${info.fill[2]},.92)`;
+  }
+
+  /**
+   * Aim assist: the cue-ball path up to the first contact, the ghost ball at
+   * that contact, the object ball's predicted line (extended to a pocket when
+   * it is lined up with one) and the cue ball's deflection afterwards.
+   */
+  _renderShotLine(cue, ang) {
+    const ctx = this.ctx;
+    const w = this.game.world;
+    const r = w.ball_radius;
+    const ux = Math.cos(ang), uy = Math.sin(ang);
+    const hit = this._firstHit(cue, ang);
+    const hx = cue.x + ux * hit.t, hy = cue.y + uy * hit.t;
+    const [sx, sy] = this.w2s(cue.x, cue.y);
+    const [ex, ey] = this.w2s(hx, hy);
+    const rs = Math.max(4, r * this.scale);
+
+    // --- cue-ball path (marching dashes so it reads as "will travel") ----
     ctx.save();
-    ctx.setLineDash([8, 8]);
-    ctx.strokeStyle = "rgba(255,255,255,.85)";
+    ctx.setLineDash([9, 8]);
+    ctx.lineDashOffset = -performance.now() * 0.018;
+    ctx.strokeStyle = "rgba(255,255,255,.80)";
     ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(ex, ey); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
     ctx.restore();
 
-    // cue stick pulled back
-    if (this.pulling && this.power > 0) {
-      const frac = this.power / MAX_LAUNCH;
-      const backLen = 40 + frac * MAX_DRAG;
-      const bx = cx - Math.cos(ang) * backLen;
-      const by = cy - Math.sin(ang) * backLen;
-      // stick
-      ctx.strokeStyle = "#d8b382";
-      ctx.lineWidth = 4;
-      ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(
-        bx - Math.cos(ang) * 150, by - Math.sin(ang) * 150); ctx.stroke();
-      // tip
-      ctx.strokeStyle = "#5b8fd6";
-      ctx.lineWidth = 4;
-      ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(
-        bx + Math.cos(ang) * 10, by + Math.sin(ang) * 10); ctx.stroke();
-      // pull-back marker
-      ctx.fillStyle = "rgba(255,120,90,.9)";
-      ctx.beginPath(); ctx.arc(bx, by, 4, 0, Math.PI * 2); ctx.fill();
+    if (hit.ball === null) {
+      // cushion first — show the reflection so bank shots can be aimed
+      let rx = ux, ry = uy;
+      if (hx <= r + 0.5 || hx >= w.width - r - 0.5) rx = -ux;
+      else ry = -uy;
+      const L = 120;
+      const [bx, by] = this.w2s(hx + rx * L, hy + ry * L);
+      ctx.save();
+      ctx.setLineDash([7, 9]);
+      ctx.strokeStyle = "rgba(255,255,255,.32)";
+      ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.moveTo(ex, ey); ctx.lineTo(bx, by); ctx.stroke();
+      ctx.restore();
+      return;
     }
+
+    const tb = hit.ball;
+    const [gx, gy] = this.w2s(hx, hy);
+
+    // --- ghost ball at the contact point --------------------------------
+    ctx.save();
+    ctx.setLineDash([4, 5]);
+    ctx.strokeStyle = "rgba(255,255,255,.50)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(gx, gy, rs, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+
+    // --- line of centres = where the object ball goes -------------------
+    let ndx = tb.x - hx, ndy = tb.y - hy;
+    const nd = Math.hypot(ndx, ndy) || 1.0;
+    ndx /= nd; ndy /= nd;
+    const cut = Math.max(0.0, ux * ndx + uy * ndy);
+
+    // How far the object ball would actually travel: stop at the first ball
+    // in its path or at the cushion, otherwise the line just paints over the
+    // rest of the rack and off the table.
+    const R2 = 2 * r;
+    let len = Math.min(240, w.width * 0.45);
+    for (const o of w.balls) {
+      if (o.pocketed || o === tb || o.kind === "cue") continue;
+      const ox = o.x - tb.x, oy = o.y - tb.y;
+      const along = ox * ndx + oy * ndy;
+      if (along <= 0) continue;
+      const perp2 = ox * ox + oy * oy - along * along;
+      if (perp2 >= R2 * R2) continue;
+      const t = along - Math.sqrt(R2 * R2 - perp2);
+      if (t > 0 && t < len) len = t;
+    }
+    // and at the cushion
+    const toCushion = (nx, ny, lo, hi, p, d) => {
+      if (d > 1e-9) return (hi - p) / d;
+      if (d < -1e-9) return (lo - p) / d;
+      return Infinity;
+    };
+    len = Math.min(len,
+      toCushion(1, 0, r, w.width - r, tb.x, ndx),
+      toCushion(0, 1, r, w.height - r, tb.y, ndy));
+
+    // is it lined up with a pocket within that distance?
+    let pk = -1, pkLen = Infinity;
+    for (let i = 0; i < w.pockets.length; i++) {
+      const [px, py] = w.pockets[i];
+      const ox = px - tb.x, oy = py - tb.y;
+      const t = ox * ndx + oy * ndy;
+      if (t <= 0 || t > len) continue;
+      if (Math.abs(-ox * ndy + oy * ndx) > w.capture_radius * 0.95) continue;
+      if (t < pkLen) { pkLen = t; pk = i; }
+    }
+    if (pk >= 0) len = pkLen;
+
+    const [bx2, by2] = this.w2s(tb.x, tb.y);
+    const [tx, ty] = this.w2s(tb.x + ndx * Math.max(6, len),
+      tb.y + ndy * Math.max(6, len));
+
+    ctx.save();
+    ctx.strokeStyle = this._ballLineColor(tb);
+    ctx.lineWidth = 2.6;
+    ctx.lineCap = "round";
+    ctx.beginPath(); ctx.moveTo(bx2, by2); ctx.lineTo(tx, ty); ctx.stroke();
+    ctx.restore();
+
+    if (pk >= 0) {
+      // the object ball is lined up with a pocket: pulse that pocket
+      const [pxs, pys] = this.w2s(w.pockets[pk][0], w.pockets[pk][1]);
+      const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.006);
+      ctx.save();
+      ctx.strokeStyle = `rgba(126,236,166,${0.30 + 0.55 * pulse})`;
+      ctx.lineWidth = 2.4;
+      ctx.beginPath(); ctx.arc(pxs, pys, rs * 1.55, 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
+    }
+
+    // --- cue ball deflection after the hit ------------------------------
+    const defl = Math.sqrt(Math.max(0.0, 1.0 - cut * cut));
+    if (defl > 0.10) {
+      const dx = ux - cut * ndx, dy = uy - cut * ndy;
+      const dl = Math.hypot(dx, dy) || 1.0;
+      const L = 26 + 78 * defl;
+      const [ax, ay] = this.w2s(hx + (dx / dl) * L, hy + (dy / dl) * L);
+      ctx.save();
+      ctx.setLineDash([5, 6]);
+      ctx.strokeStyle = "rgba(255,255,255,.38)";
+      ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.moveTo(gx, gy); ctx.lineTo(ax, ay); ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  _renderAim() {
+    const cue = this.game.cue();
+    if (cue === null) return;
+    this._renderShotLine(cue, this.aim_angle);
+    const [cx, cy] = this.w2s(cue.x, cue.y);
+    const r = Math.max(4, cue.radius * this.scale);
+    const frac = this.pulling ? this.power / MAX_LAUNCH : 0.0;
+    // the cue draws back as the player pulls, and sits just off the ball idle
+    const gap = r * 1.25 + frac * r * 3.6;
+    this._renderCue(cx, cy, this.aim_angle, gap, 1.0);
+  }
+
+  /**
+   * A real cue: tapered maple shaft, ivory ferrule, chalked tip, rosewood
+   * butt with a linen wrap, lit from above and casting a shadow on the cloth.
+   * Drawn in a rotated frame whose +x is the shot direction, so the cue always
+   * lies along -x with its tip `gap` pixels from the cue ball's centre.
+   */
+  _renderCue(px, py, ang, gap, alpha = 1.0) {
+    const ctx = this.ctx;
+    let L = 225;
+    // Keep the whole cue on the canvas: walking back from the ball along
+    // (-cos, -sin), find where that ray leaves the frame and shorten the cue
+    // if the butt would poke out. A hard cut at the window edge reads as a
+    // rendering glitch, a slightly shorter cue does not.
+    const ca = Math.cos(ang), sa = Math.sin(ang);
+    const M = 6;
+    let room = Infinity;
+    if (ca > 1e-6) room = Math.min(room, (px - M) / ca);
+    else if (ca < -1e-6) room = Math.min(room, (WIN_W - M - px) / -ca);
+    if (sa > 1e-6) room = Math.min(room, (py - M) / sa);
+    else if (sa < -1e-6) room = Math.min(room, (WIN_H - M - py) / -sa);
+    if (gap + L > room) L = Math.max(70, room - gap);
+
+    // A real cue's tip is roughly a fifth of a ball's diameter; scale the
+    // shaft by the ball's on-screen radius so the proportions hold in both
+    // modes (the snooker ball draws much smaller than an 8-ball).
+    const rr = (this.game && this.game.world)
+      ? this.game.world.ball_radius * this.scale : 11.0;
+    const k = Math.max(0.85, Math.min(2.4, rr / 7.6));
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(px, py);
+    ctx.rotate(ang);
+    ctx.scale(1, k);
+
+    const tipX = -gap;
+    const buttX = -gap - L;
+    const shaftEnd = tipX - L * 0.58;     // where the shaft meets the butt
+    const ferruleX = tipX - 9.0;
+
+    // shadow on the cloth
+    ctx.save();
+    ctx.shadowColor = "rgba(0,0,0,.55)";
+    ctx.shadowBlur = 11;
+    ctx.shadowOffsetY = 7;
+    ctx.beginPath();
+    ctx.moveTo(tipX, -1.5); ctx.lineTo(buttX, -4.2);
+    ctx.lineTo(buttX, 4.2); ctx.lineTo(tipX, 1.5);
+    ctx.closePath();
+    ctx.fillStyle = "#150e07";
+    ctx.fill();
+    ctx.restore();
+
+    // maple shaft
+    const sg = ctx.createLinearGradient(0, -3.0, 0, 3.0);
+    sg.addColorStop(0.00, "#fbf1dc");
+    sg.addColorStop(0.28, "#eddbb2");
+    sg.addColorStop(0.62, "#d2b384");
+    sg.addColorStop(1.00, "#9c7a4f");
+    ctx.beginPath();
+    ctx.moveTo(tipX, -1.45); ctx.lineTo(shaftEnd, -2.7);
+    ctx.lineTo(shaftEnd, 2.7); ctx.lineTo(tipX, 1.45);
+    ctx.closePath();
+    ctx.fillStyle = sg; ctx.fill();
+
+    // rosewood butt
+    const bg = ctx.createLinearGradient(0, -4.2, 0, 4.2);
+    bg.addColorStop(0.00, "#74432a");
+    bg.addColorStop(0.26, "#43251a");
+    bg.addColorStop(0.58, "#251410");
+    bg.addColorStop(1.00, "#110a08");
+    ctx.beginPath();
+    ctx.moveTo(shaftEnd, -2.7); ctx.lineTo(buttX, -4.2);
+    ctx.lineTo(buttX, 4.2); ctx.lineTo(shaftEnd, 2.7);
+    ctx.closePath();
+    ctx.fillStyle = bg; ctx.fill();
+
+    // linen wrap
+    ctx.save();
+    ctx.globalAlpha = alpha * 0.30;
+    ctx.strokeStyle = "#cfa76e";
+    ctx.lineWidth = 0.8;
+    for (let x = shaftEnd - 6; x > buttX + 24; x -= 5.5) {
+      ctx.beginPath(); ctx.moveTo(x, -3.3); ctx.lineTo(x - 2.0, 3.3); ctx.stroke();
+    }
+    ctx.restore();
+
+    // joint collar
+    ctx.fillStyle = "#d9dee4";
+    ctx.fillRect(shaftEnd - 2, -2.8, 4, 5.6);
+
+    // ferrule + chalked tip
+    ctx.fillStyle = "#f5f2e7";
+    ctx.fillRect(ferruleX, -1.5, 6, 3.0);
+    ctx.fillStyle = "#3f74b8";
+    ctx.beginPath();
+    ctx.moveTo(tipX - 3, -1.55); ctx.lineTo(tipX, -1.45);
+    ctx.lineTo(tipX, 1.45); ctx.lineTo(tipX - 3, 1.55);
+    ctx.closePath();
+    ctx.fill();
+
+    // specular highlight along the shaft
+    ctx.strokeStyle = "rgba(255,255,255,.42)";
+    ctx.lineWidth = 0.9;
+    ctx.beginPath();
+    ctx.moveTo(ferruleX, -0.8); ctx.lineTo(shaftEnd - 3, -1.5);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  /** The cue snapping through the ball right after the trigger. */
+  _renderStrike() {
+    if (!this.strike_from) return;
+    const cue = this.game.cue();
+    const r = cue ? Math.max(4, cue.radius * this.scale) : 5;
+    const [px, py] = this.w2s(this.strike_from[0], this.strike_from[1]);
+    const t = this.strike_t;                     // 1 -> 0
+    const follow = (1.0 - t) * r * 2.6;          // drifts through the ball
+    this._renderCue(px, py, this.strike_angle, r * 1.35 * t - follow,
+      Math.min(1.0, t * 2.4));
   }
 
   _renderPowerBar() {
@@ -675,7 +1053,16 @@ class App {
     ctx.fillStyle = col;
     this._roundRect(bx, by, Math.max(2, bw * frac), bh, 4); ctx.fill();
 
-    this._text("POWER", WIN_W / 2, by - 8, 11, "#9aa1ad", "center", 700);
+    // quarter ticks so a soft touch is easy to judge
+    ctx.strokeStyle = "rgba(0,0,0,.28)";
+    ctx.lineWidth = 1;
+    for (const q of [0.25, 0.5, 0.75]) {
+      const qx = bx + bw * q;
+      ctx.beginPath(); ctx.moveTo(qx, by + 1); ctx.lineTo(qx, by + bh - 1); ctx.stroke();
+    }
+
+    this._text(`POWER  ${Math.round(frac * 100)}%`,
+      WIN_W / 2, by - 8, 11, "#9aa1ad", "center", 700);
   }
 
   _renderHud() {
@@ -700,14 +1087,21 @@ class App {
     if (this.phase === "over") msg = g.message;
     else if (this.await_place && this._humanTurn()) {
       msg = "Ball in hand — click inside the allowed area to place the cue ball.";
-    } else if (this.pending_bot) msg = "Bot is taking its shot…";
-    else if (this.simulating) msg = "…";
+    } else if (this.pending_bot) {
+      msg = this.bot_aim
+        ? `Bot is lining up — ${Math.round(this.bot_aim[1] / MAX_LAUNCH * 100)}% power…`
+        : "Bot is thinking…";
+    } else if (this.simulating) msg = "…";
     else {
       const who = this._humanTurn() ? "Your turn" : "Bot's turn";
       msg = `${who} — ${g.message}`;
     }
     this._text(msg, 20, 54, 14.5, "#c2c8d3", "left", 400);
 
+    if (this.phase === "play" && this._humanTurn() && !this.await_place && !this.simulating) {
+      this._text("drag back from the cue ball to aim · the farther you pull, the harder the stroke",
+        20, WIN_H - 14, 12, "#8b929e", "left", 400);
+    }
     this._text("R / Esc: menu", WIN_W - 18, WIN_H - 14, 12, "#8b929e", "right", 400);
   }
 
