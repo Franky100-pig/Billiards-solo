@@ -50,26 +50,26 @@ class SnookerGame:
             3: (baulk_x, H * 0.30),
             4: (baulk_x, H * 0.50),
             5: (W * 0.50, H * 0.50),
-            6: (W * 0.75, H * 0.50),
-            7: (W * 0.88, H * 0.50),
+            6: (W * 0.72, H * 0.50),
+            7: (W * 0.90, H * 0.50),
         }
         # colours
         for val, (sx, sy) in spots.items():
             b = Ball(sx, sy, r, number=val, kind="color")
             w.add_ball(b)
-        # reds: triangle between blue and pink
-        apex_x = W * 0.60
+        # reds: apex faces the baulk end (left), the pack widens toward black
+        apex_x = W * 0.75
         apex_y = H * 0.50
         idx = 0
         for row in range(5):
-            x = apex_x - row * r * math.sqrt(3.0)
+            x = apex_x + row * r * math.sqrt(3.0)
             for j in range(row + 1):
                 y = apex_y + (j - row / 2.0) * 2.0 * r
                 b = Ball(x, y, r, number=1, kind="red")
                 w.add_ball(b)
                 idx += 1
-        # cue ball in the D
-        cue = Ball(baulk_x, H * 0.50, r, number=0, kind="cue")
+        # cue ball in the D (offset from the brown spot so they don't overlap)
+        cue = Ball(baulk_x + r * 3, H * 0.50, r, number=0, kind="cue")
         w.add_ball(cue)
 
     # -- queries -----------------------------------------------------------
@@ -279,7 +279,7 @@ class SnookerGame:
         W, H = w.width, w.height
         baulk_x = W * 0.25
         spots = {2: (baulk_x, H*0.70), 3: (baulk_x, H*0.30), 4: (baulk_x, H*0.50),
-                 5: (W*0.50, H*0.50), 6: (W*0.75, H*0.50), 7: (W*0.88, H*0.50)}
+                 5: (W*0.50, H*0.50), 6: (W*0.72, H*0.50), 7: (W*0.90, H*0.50)}
         for v in vals:
             b = next((x for x in w.balls if x.number == v and x.kind == "color"), None)
             if b is None:

@@ -179,6 +179,50 @@ class World:
                 continue
             self._collide_cushions(b)
 
+        # 4) safety net: never let a ball leave the table. A fast ball can thread
+        # the tiny sliver of a corner pocket gap (gap diagonal slightly exceeds
+        # the capture radius); without this it would fly off to infinity and the
+        # simulation would never settle. Out-of-bounds balls near a pocket are
+        # captured as legitimate drops; otherwise they are clamped and bounced.
+        for b in self.balls:
+            if b.pocketed:
+                continue
+            self._contain_ball(b)
+
+    def _contain_ball(self, b: Ball) -> None:
+        r = b.radius
+        W, H = self.width, self.height
+        if not (b.x < r or b.x > W - r or b.y < r or b.y > H - r):
+            return
+        for px, py in self.pockets:
+            if math.hypot(b.x - px, b.y - py) < self.capture_radius + self.gap + r:
+                b.pocketed = True
+                b.vx = 0.0
+                b.vy = 0.0
+                self.pocketed_this_shot.append(b.number)
+                return
+        e = self.restitution_cushion
+        if b.x < r:
+            b.x = r
+            if b.vx < 0:
+                b.vx = -b.vx * e
+                self.rail_hit.add(b.number)
+        elif b.x > W - r:
+            b.x = W - r
+            if b.vx > 0:
+                b.vx = -b.vx * e
+                self.rail_hit.add(b.number)
+        if b.y < r:
+            b.y = r
+            if b.vy < 0:
+                b.vy = -b.vy * e
+                self.rail_hit.add(b.number)
+        elif b.y > H - r:
+            b.y = H - r
+            if b.vy > 0:
+                b.vy = -b.vy * e
+                self.rail_hit.add(b.number)
+
     def simulate(self, h: float = 1.0 / 480.0, max_steps: int = 8000) -> int:
         """Run until all balls rest or max_steps reached. Returns steps used."""
         steps = 0
