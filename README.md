@@ -35,6 +35,24 @@ No install, no local server, no network:
   the shot travels opposite the drag.
 - **R / Esc** — back to the menu.
 
+The drag is gamma-shaped (`power = min + frac^1.35 · range`), so the first third of the pull is a soft touch
+and only the last stretch reaches a full stroke. A live `POWER n%` bar makes it easy to judge.
+
+### Presentation
+
+![Break](docs/screenshots/break.png)
+
+- **Rolling balls.** Each ball carries a roll angle (`dθ = ds / r`, so it turns exactly as far as it travels).
+  The number patch and the snooker sheen slide and squash across the sphere as it turns, and disappear behind
+  the horizon when the ball has rolled past them; a soft ball-coloured comet tail trails anything moving fast.
+  When a ball settles, the pattern eases face-up so the number is always readable at rest.
+- **The cue.** A drawn cue — rosewood butt, linen wrap, joint collar, maple shaft, ivory ferrule, chalked tip
+  — sits off the cue ball, pulls back as you drag and snaps through the ball on release. Its thickness scales
+  with the ball radius, and it is shortened if the butt would leave the canvas.
+- **The shot line.** The cue-ball path to first contact, the **ghost ball** at that contact point, the object
+  ball's line (clipped to the first ball or cushion in the way, and pulsing the pocket when it is lined up),
+  and the cue ball's deflection afterwards — all from pure geometry, recomputed every frame.
+
 ### Why it really is offline
 - Plain classic `<script>` tags (no ES modules), so opening the file via `file://` works — **no `http.server` needed**.
 - No network requests, no accounts, no cookies, no `localStorage`.
@@ -80,6 +98,19 @@ gets a **penalty**, so the bot prefers a slightly harder pot that keeps position
 **Escape shots.** When nothing can be potted (blocked line, i.e. snookered), it mirrors each target across
 every cushion to build **one-rail bank/kick** lines, simulates them, and plays the one that legally contacts
 the ball that is on. A plain safety is the last resort.
+
+**Measured power, not maximum power.** The old heuristic (`360 + 5.5 × distance`) was roughly ten times too
+hot, so almost every shot saturated the cap and the bot smashed everything. With per-second exponential
+friction a ball coasts exactly `v₀ / k` units, so the stroke a shot actually needs follows from the geometry:
+
+```
+power = k · (d_cue→ghost + d_object→pocket / cos(cut)) + 40
+```
+
+Thin cuts need proportionally more cue speed because only the normal component transfers. The result is short
+positional strokes for short pots and a full stroke only when the table demands one — a full 8-ball frame now
+strokes between roughly 130 and 1000 units instead of pinning 1350, and the break is the one shot that is
+deliberately fired hard (`BREAK_8BALL = 950`, `BREAK_SNOOKER = 520`).
 
 Difficulty tiers change aim noise, search depth and power jitter. The physics is framework-agnostic, so the
 whole bot runs headless (that is how it is verified).
@@ -129,12 +160,14 @@ The JavaScript port surfaced three genuine bugs that also affected the Python bu
 
 ## Verification
 
-- **Logic (Node, headless): 14/14** — physics settles; a full 8-ball frame completes; **no ball ever leaves
-  the table**; snooker reds decrement consistently; colours pot in ascending order.
+- **Logic (Node, headless): 23/23** — physics settles; rolling advances with travel; a full 8-ball frame
+  completes; **no ball ever leaves the table**; the bot's strokes stay inside the power envelope and average
+  well below the cap; snooker reds decrement consistently; colours pot in ascending order.
 - **Position play & escapes (Node, headless): 6/6** — a deliberately snookered cue finds a one-rail kick that
   contacts the ball on, stays on the table, and the 8-ball / snooker frames still finish.
-- **UI wiring (headless DOM/Canvas): 20/20** — menu → start → place → aim → shoot → resolve → bot turn, for
-  both modes, plus the game-over overlay.
+- **UI wiring (headless DOM/Canvas): 30/30** — menu → start → place → aim → pull → strike → resolve → bot
+  turn, for both modes, plus the game-over overlay and a monotonic power curve from a soft tap to a full
+  stroke.
 - Screenshots above are real renders captured with headless Chrome.
 
 ## Scope / progress
@@ -148,6 +181,8 @@ The JavaScript port surfaced three genuine bugs that also affected the Python bu
 - [x] **Zero-dependency offline web build (Canvas 2D)**
 - [x] Standard-proportion snooker table, markings and ball set
 - [x] Bot position play (走位) + one-rail escape shots
+- [x] Rolling-ball animation, drawn cue and the full aiming aid
+- [x] Measured bot power (no more "everything at maximum")
 - [x] Offline verification: 8-ball and snooker can be played to completion
 - [x] Hosted copies: GitHub Pages & WorkBuddy
 
@@ -166,6 +201,15 @@ Learning / engineering exercise. Gameplay inspiration comes from bloob.io (Kingl
 配木质台身、绿色台呢、开球线与 D 区、六个点位、角袋大于中袋、无色号的高光球体。
 bot 除 ghost-ball 进球搜索外，新增**走位评估**（打完球后母球是否还有清晰下一杆）与**一库解球**救球，
 被斯诺克时不再直接犯规。逆向结论、建模决策与移植中修复的 bug 见上文与 `docs/REA_findings.md`。
+
+**画面**：球会真的滚（号码盘随滚动滑移、压扁、转到背面消失，停下时自动转正），快速移动带拖影；
+球杆是完整的（紫檀后把、线缠、接牙、枫木前节、白铜先角、巧克杆头），拉杆时后撤、出杆时抽送；
+瞄准辅助给出母球路径、假想球、目标球预测线（遇到球或库边就截断，正对袋口时袋口脉冲）和母球分离线。
+
+**力度**：bot 不再"每杆最大力"。指数摩擦下球滑行距离恰为 `v₀/k`，于是所需速度可由几何直接算出
+`power = k·(母球到假想球距离 + 目标球到袋距离 / cos(切角))`，薄球按法向分量补偿。实测一整局 8 球
+力度落在 ~130–1000（上限 1350），只有开球是刻意发力。玩家侧拖拽用 gamma 曲线，前 1/3 是轻推，
+后段才到满杆，并实时显示 `POWER n%`。
 
 ---
 
