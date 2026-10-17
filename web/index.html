@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>Billiards-solo — offline 8-ball &amp; snooker vs AI</title>
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <main class="stage">
+    <canvas id="game" width="960" height="660"
+            aria-label="Billiards-solo table"></canvas>
+    <p class="offline-note">
+      Fully offline — no network, no accounts, no tracking. Reverse-engineered study of bloob.io, reimplemented from scratch.
+    </p>
+  </main>
+
+  <!-- Classic scripts (no modules) so the page also works when opened via file:// -->
+  <script src="js/physics.js"></script>
+  <script src="js/rules8ball.js"></script>
+  <script src="js/rulesSnooker.js"></script>
+  <script src="js/bot.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
