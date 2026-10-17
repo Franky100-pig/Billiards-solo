@@ -7,6 +7,29 @@
 const COLOR_VALUES = { 2: "yellow", 3: "green", 4: "brown", 5: "blue", 6: "pink", 7: "black" };
 const COLOR_ORDER = [2, 3, 4, 5, 6, 7];   // ascending, end-game sequence
 
+/**
+ * Standard snooker spots on a W x H playing surface.
+ * Baulk line at 0.2065 L, D radius 0.1636 W, blue dead centre, pink at 0.75 L
+ * (midway centre->top cushion), black at 0.9092 L (324 mm off the top cushion).
+ * Yellow / green sit on the corners of the D, brown in its middle.
+ */
+function snookerSpots(W, H) {
+  const baulk = W * SNOOKER_BAULK_X;
+  const d_r = H * SNOOKER_D_RADIUS;
+  return {
+    baulk_x: baulk,
+    d_radius: d_r,
+    colors: {
+      2: [baulk, H * 0.5 + d_r],   // yellow
+      3: [baulk, H * 0.5 - d_r],   // green
+      4: [baulk, H * 0.5],         // brown
+      5: [W * 0.5, H * 0.5],       // blue
+      6: [W * SNOOKER_PINK_X, H * 0.5],   // pink
+      7: [W * SNOOKER_BLACK_X, H * 0.5],  // black
+    },
+  };
+}
+
 class SnookerGame {
   constructor(human_is_player = 0) {
     this.world = makeSnookerWorld();
@@ -31,32 +54,26 @@ class SnookerGame {
     const w = this.world;
     const r = w.ball_radius;
     const W = w.width, H = w.height;
-    const baulk_x = W * 0.25;
-    const spots = {
-      2: [baulk_x, H * 0.70],
-      3: [baulk_x, H * 0.30],
-      4: [baulk_x, H * 0.50],
-      5: [W * 0.50, H * 0.50],
-      6: [W * 0.72, H * 0.50],
-      7: [W * 0.90, H * 0.50],
-    };
-    for (const val of Object.keys(spots)) {
-      const [sx, sy] = spots[val];
-      const b = new Ball(sx, sy, r, MASS, Number(val), "color");
-      w.addBall(b);
+    const spots = snookerSpots(W, H);
+    for (const key of Object.keys(spots.colors)) {
+      const [sx, sy] = spots.colors[key];
+      w.addBall(new Ball(sx, sy, r, MASS, Number(key), "color"));
     }
-    // Reds: apex faces the baulk end (left), the pack widens toward black.
-    const apex_x = W * 0.75, apex_y = H * 0.50;
+    // Reds: apex faces the baulk end, the pack widens toward black.
+    const apex_x = spots.colors[6][0] + 2 * r + 0.4;
+    const apex_y = H * 0.50;
     for (let row = 0; row < 5; row++) {
       const x = apex_x + row * r * Math.sqrt(3.0);
       for (let j = 0; j <= row; j++) {
         const y = apex_y + (j - row / 2.0) * 2.0 * r;
-        const b = new Ball(x, y, r, MASS, 1, "red");
-        w.addBall(b);
+        w.addBall(new Ball(x, y, r, MASS, 1, "red"));
       }
     }
-    // cue ball in the D (offset from the brown spot so they don't overlap)
-    const cue = new Ball(baulk_x + r * 3, H * 0.50, r, MASS, 0, "cue");
+    // Cue ball starts INSIDE the D (rule 3.3: the striker plays from in the D)
+    const cue = new Ball(
+      spots.baulk_x - spots.d_radius * 0.45,
+      H * 0.50 + spots.d_radius * 0.55,
+      r, MASS, 0, "cue");
     w.addBall(cue);
   }
 
@@ -100,10 +117,10 @@ class SnookerGame {
     if (!this.ball_in_hand) return false;
     const w = this.world;
     const r = w.ball_radius;
-    const baulk_x = w.width * 0.25;
-    if (!(baulk_x - r <= x && x <= baulk_x + w.height * 0.5 + r)) return false;
+    const spots = snookerSpots(w.width, w.height);
     if (!(r <= y && y <= w.height - r)) return false;
-    if (Math.hypot(x - baulk_x, y - w.height / 2.0) > w.height * 0.5 + r) return false;
+    // rule: the cue ball must be played from inside the D
+    if (Math.hypot(x - spots.baulk_x, y - w.height / 2.0) > spots.d_radius) return false;
     for (const b of w.balls) {
       if (b.kind === "cue" || b.pocketed) continue;
       if (Math.hypot(b.x - x, b.y - y) < 2 * r) return false;
@@ -138,7 +155,9 @@ class SnookerGame {
 
   auto_place_cue() {
     const w = this.world;
-    this.place_cue(w.width * 0.25, w.height / 2.0);
+    const spots = snookerSpots(w.width, w.height);
+    this.place_cue(spots.baulk_x - spots.d_radius * 0.50,
+      w.height / 2.0 + spots.d_radius * 0.55);
   }
 
   _evaluate() {
@@ -244,18 +263,14 @@ class SnookerGame {
     const w = this.world;
     const r = w.ball_radius;
     const W = w.width, H = w.height;
-    const baulk_x = W * 0.25;
-    const spots = {
-      2: [baulk_x, H * 0.70], 3: [baulk_x, H * 0.30], 4: [baulk_x, H * 0.50],
-      5: [W * 0.50, H * 0.50], 6: [W * 0.72, H * 0.50], 7: [W * 0.90, H * 0.50],
-    };
+    const spots = snookerSpots(W, H);
     for (const v of vals) {
       let b = w.balls.find(x => x.number === v && x.kind === "color");
       if (b === undefined) {
         b = new Ball(0, 0, r, MASS, v, "color");
         w.addBall(b);
       }
-      let [sx, sy] = spots[v];
+      let [sx, sy] = spots.colors[v];
       while (w.balls.some(other => other !== b && !other.pocketed &&
         Math.hypot(other.x - sx, other.y - sy) < 2 * r)) {
         sy += r;
@@ -270,17 +285,21 @@ class SnookerGame {
   _respot_cue() {
     const w = this.world;
     const r = w.ball_radius;
-    const baulk_x = w.width * 0.25;
+    const spots = snookerSpots(w.width, w.height);
     let cue = this.cue();
     if (cue === null) {
       cue = new Ball(0, 0, r, MASS, 0, "cue");
       w.addBall(cue);
     }
-    let x = baulk_x, y = w.height * 0.50;
+    let x = spots.baulk_x - spots.d_radius * 0.50;
+    let y = w.height * 0.50 + spots.d_radius * 0.55;
     while (w.balls.some(b => b !== cue && !b.pocketed &&
       Math.hypot(b.x - x, b.y - y) < 2 * r)) {
       y += r;
-      if (y > w.height - r) { y = w.height * 0.50; x += r; }
+      if (y > w.height * 0.5 + spots.d_radius) {
+        y = w.height * 0.5 - spots.d_radius * 0.6;
+        x -= r;
+      }
     }
     cue.x = x; cue.y = y;
     cue.pocketed = false;
@@ -300,5 +319,5 @@ class SnookerGame {
 }
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { SnookerGame, COLOR_VALUES, COLOR_ORDER };
+  module.exports = { SnookerGame, COLOR_VALUES, COLOR_ORDER, snookerSpots };
 }

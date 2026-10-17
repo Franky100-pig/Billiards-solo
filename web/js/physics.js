@@ -13,9 +13,22 @@ const BALL_RADIUS_8BALL = 11.0;
 const POCKET_RADIUS_8BALL = 11.0;
 const FIELD_8BALL = [572.0, 330.0];
 
+// Snooker uses STANDARD table proportions: a 12ft table plays 3569 x 1778 mm,
+// i.e. exactly 2:1, with 52.5 mm balls. Scaled to a 620-unit playing surface
+// the ball is ~9.1 units, so we use 9.0. (bloob's own snooker field was
+// 572 x 310, a 1.85:1 ratio which does not look like a real snooker table.)
 const BALL_RADIUS_SNOOKER = 8.5;
-const POCKET_RADIUS_SNOOKER = 5.0;
-const FIELD_SNOOKER = [572.0, 310.0];
+const POCKET_RADIUS_SNOOKER = 7.5;
+const FIELD_SNOOKER = [620.0, 310.0];
+
+// Standard snooker markings, expressed as fractions of the playing surface.
+// https://en.wikipedia.org/wiki/Billiard_table: baulk line at 1/5 of the
+// length, D radius 292 mm (0.1636 of the width), black spot 324 mm off the
+// top cushion, pink halfway between the centre spot and the top cushion.
+const SNOOKER_BAULK_X = 0.2065;   // fraction of table LENGTH
+const SNOOKER_D_RADIUS = 0.1636;  // fraction of table WIDTH
+const SNOOKER_BLACK_X = 0.9092;
+const SNOOKER_PINK_X = 0.75;
 
 const MASS = 3.0;
 const RESTITUTION_BALL = 0.9;
@@ -286,14 +299,14 @@ function make8BallWorld() {
 }
 
 function makeSnookerWorld() {
-  const g = 572.0, h = 310.0;
-  const cx = g / 2.0, cy = h / 2.0;
-  const raw = [
-    [g / 2 - 5, h / 2 - 5], [0, h / 2 - 2.5], [-g / 2 + 5, h / 2 - 5],
-    [g / 2 - 5, -h / 2 + 5], [0, -h / 2 + 2.5], [-g / 2 + 5, -h / 2 + 5],
+  const [W, H] = FIELD_SNOOKER;
+  // Standard pockets: four corners plus the two middle pockets on the long
+  // rails (which is why a snooker table is not a simple 6-hole rectangle).
+  const pockets = [
+    [0.0, 0.0], [W / 2.0, 0.0], [W, 0.0],
+    [0.0, H], [W / 2.0, H], [W, H],
   ];
-  const pockets = raw.map(([x, y]) => [cx + x, cy + y]);
-  return new World(g, h, BALL_RADIUS_SNOOKER, POCKET_RADIUS_SNOOKER, pockets);
+  return new World(W, H, BALL_RADIUS_SNOOKER, POCKET_RADIUS_SNOOKER, pockets);
 }
 
 if (typeof module !== "undefined" && module.exports) {
@@ -301,6 +314,7 @@ if (typeof module !== "undefined" && module.exports) {
     Ball, World, make8BallWorld, makeSnookerWorld,
     BALL_RADIUS_8BALL, POCKET_RADIUS_8BALL, FIELD_8BALL,
     BALL_RADIUS_SNOOKER, POCKET_RADIUS_SNOOKER, FIELD_SNOOKER,
+    SNOOKER_BAULK_X, SNOOKER_D_RADIUS, SNOOKER_BLACK_X, SNOOKER_PINK_X,
     MASS, RESTITUTION_BALL, RESTITUTION_CUSHION, DAMPING, SLEEP_SPEED, SOLVER_ITER,
   };
 }

@@ -26,14 +26,22 @@ const EIGHT_COLORS = {
   1: [240, 205, 45], 2: [40, 70, 200], 3: [210, 45, 45], 4: [150, 45, 200],
   5: [225, 130, 35], 6: [40, 165, 70], 7: [155, 45, 45], 8: [22, 22, 22],
 };
-// snooker colours (number -> rgb)
+// snooker colours (number -> rgb). Standard ball set: plain gloss, no numbers.
 const SNOOKER_COLORS = {
-  1: [205, 45, 45], 2: [235, 210, 45], 3: [40, 165, 70], 4: [150, 95, 45],
-  5: [45, 95, 215], 6: [240, 150, 185], 7: [22, 22, 22],
+  1: [188, 32, 44],    // red
+  2: [242, 200, 68],   // yellow
+  3: [18, 116, 58],    // green
+  4: [120, 72, 32],    // brown
+  5: [18, 70, 162],    // blue
+  6: [230, 122, 152],  // pink
+  7: [24, 24, 24],     // black
 };
+const SNOOKER_CUE = [247, 243, 232];   // ivory cue ball
 
 function ballColor(b, snooker) {
-  if (b.kind === "cue") return { fill: [235, 235, 235], stripe: false };
+  if (b.kind === "cue") {
+    return { fill: snooker ? SNOOKER_CUE : [235, 235, 235], stripe: false };
+  }
   if (snooker) return { fill: SNOOKER_COLORS[b.number] || [200, 200, 200], stripe: false };
   if (b.number >= 9 && b.number <= 15) {
     return { fill: EIGHT_COLORS[b.number - 8], stripe: true };
@@ -42,6 +50,15 @@ function ballColor(b, snooker) {
 }
 
 function rgb(a) { return `rgb(${a[0]},${a[1]},${a[2]})`; }
+
+/** Mix a colour toward white (k>0) or black (k<0). */
+function shade(a, k) {
+  const t = Math.min(1, Math.abs(k));
+  const target = k > 0 ? 255 : 0;
+  return `rgb(${Math.round(a[0] + (target - a[0]) * t)},`
+    + `${Math.round(a[1] + (target - a[1]) * t)},`
+    + `${Math.round(a[2] + (target - a[2]) * t)})`;
+}
 
 function getPos(canvas, evt) {
   const rect = canvas.getBoundingClientRect();
@@ -359,6 +376,7 @@ class App {
   }
 
   _renderTable() {
+    if (this.snooker) { this._renderSnookerTable(); return; }
     const ctx = this.ctx;
     const w = this.game.world;
     const [x0, y0] = this.w2s(0, 0);
@@ -386,16 +404,6 @@ class App {
     ctx.fillStyle = sh;
     ctx.fillRect(x0, y0, tw, th);
 
-    // baulk line + D for snooker
-    if (this.snooker) {
-      const bx = this.ox + w.width * 0.25 * this.scale;
-      ctx.strokeStyle = "rgba(215,215,215,.65)";
-      ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.moveTo(bx, y0); ctx.lineTo(bx, y0 + th); ctx.stroke();
-      const cy = y0 + th / 2, rr = th * 0.5;
-      ctx.beginPath(); ctx.arc(bx, cy, rr, -Math.PI / 2, Math.PI / 2); ctx.stroke();
-    }
-
     // pockets
     for (const [px, py] of w.pockets) {
       const [sx, sy] = this.w2s(px, py);
@@ -408,12 +416,161 @@ class App {
     }
   }
 
+  /**
+   * Standard snooker table: mahogany body, green baize, cushion band, baulk
+   * line + D, the six spots, and corner pockets larger than the middles.
+   */
+  _renderSnookerTable() {
+    const ctx = this.ctx;
+    const w = this.game.world;
+    const [x0, y0] = this.w2s(0, 0);
+    const tw = w.width * this.scale, th = w.height * this.scale;
+    const rail = RAIL + 8;
+    const cush = Math.max(10, 17 * this.scale);
+
+    // --- mahogany body ---------------------------------------------------
+    ctx.save();
+    ctx.shadowColor = "rgba(0,0,0,.55)";
+    ctx.shadowBlur = 30;
+    ctx.shadowOffsetY = 13;
+    const body = ctx.createLinearGradient(x0 - rail, y0 - rail,
+      x0 + tw + rail, y0 + th + rail);
+    body.addColorStop(0.00, "#4a2a18");
+    body.addColorStop(0.22, "#7b482a");
+    body.addColorStop(0.52, "#63381f");
+    body.addColorStop(0.78, "#7d4a2b");
+    body.addColorStop(1.00, "#3f2113");
+    ctx.fillStyle = body;
+    this._roundRect(x0 - rail, y0 - rail, tw + 2 * rail, th + 2 * rail, 16);
+    ctx.fill();
+    ctx.restore();
+
+    // bevelled top edge of the wood
+    ctx.strokeStyle = "rgba(255,226,190,.16)";
+    ctx.lineWidth = 1.5;
+    this._roundRect(x0 - rail + 1.5, y0 - rail + 1.5,
+      tw + 2 * rail - 3, th + 2 * rail - 3, 15);
+    ctx.stroke();
+
+    // brass-ish sight markers along the rails (nice, cheap detail)
+    ctx.fillStyle = "rgba(214,178,110,.55)";
+    for (const f of [0.25, 0.5, 0.75]) {
+      const sx = x0 + tw * f;
+      for (const yy of [y0 - rail / 2, y0 + th + rail / 2]) {
+        ctx.beginPath(); ctx.arc(sx, yy, 1.6, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+
+    // --- cushion band (rubber, lighter than the cloth, dark shadow line) --
+    ctx.fillStyle = "#24955c";
+    ctx.fillRect(x0 - cush, y0 - cush, tw + 2 * cush, th + 2 * cush);
+    ctx.strokeStyle = "rgba(255,255,255,.10)";
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(x0 - cush + 1, y0 - cush + 1,
+      tw + 2 * cush - 2, th + 2 * cush - 2);
+
+    // --- cloth -----------------------------------------------------------
+    const cloth = ctx.createLinearGradient(x0, y0, x0 + tw * 0.4, y0 + th);
+    cloth.addColorStop(0, "#127a48");
+    cloth.addColorStop(0.55, "#0e6a3e");
+    cloth.addColorStop(1, "#0a5933");
+    ctx.fillStyle = cloth;
+    ctx.fillRect(x0, y0, tw, th);
+
+    // cushion nose (where the rubber meets the cloth)
+    ctx.strokeStyle = "rgba(0,0,0,.42)";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x0, y0, tw, th);
+
+    // inner shadow where the cloth meets the cushions
+    const sh = ctx.createLinearGradient(0, y0, 0, y0 + 12);
+    sh.addColorStop(0, "rgba(0,0,0,.30)");
+    sh.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = sh;
+    ctx.fillRect(x0, y0, tw, 12);
+    ctx.save();
+    ctx.translate(0, y0 + th);
+    ctx.scale(1, -1);
+    ctx.fillStyle = sh;
+    ctx.fillRect(x0, 0, tw, 12);
+    ctx.restore();
+
+    // --- markings: baulk line, D, spots ----------------------------------
+    const bx = this.ox + w.width * SNOOKER_BAULK_X * this.scale;
+    const dr = w.height * SNOOKER_D_RADIUS * this.scale;
+    const cys = y0 + th / 2;
+    ctx.strokeStyle = "rgba(238,240,228,.40)";
+    ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.moveTo(bx, y0); ctx.lineTo(bx, y0 + th); ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(bx, cys, dr, Math.PI / 2, Math.PI * 1.5);   // bulge toward baulk
+    ctx.stroke();
+
+    const spots = snookerSpots(w.width, w.height);
+    ctx.fillStyle = "rgba(238,240,228,.50)";
+    for (const key of Object.keys(spots.colors)) {
+      const [wx, wy] = spots.colors[key];
+      const [sx, sy] = this.w2s(wx, wy);
+      ctx.beginPath(); ctx.arc(sx, sy, 2.2, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // --- pockets ---------------------------------------------------------
+    const cr = w.capture_radius * this.scale;
+    for (let i = 0; i < w.pockets.length; i++) {
+      const [sx, sy] = this.w2s(w.pockets[i][0], w.pockets[i][1]);
+      const middle = (i === 1 || i === 4);
+      const pr = (middle ? 0.80 : 1.05) * cr;
+      // mouth
+      const pg = ctx.createRadialGradient(sx, sy, pr * 0.15, sx, sy, pr);
+      pg.addColorStop(0, "#000000");
+      pg.addColorStop(0.72, "#050d08");
+      pg.addColorStop(1, "#123024");
+      ctx.fillStyle = pg;
+      ctx.beginPath(); ctx.arc(sx, sy, pr, 0, Math.PI * 2); ctx.fill();
+      // leather rim
+      ctx.strokeStyle = "rgba(28,16,8,.85)";
+      ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(sx, sy, pr + 1.2, 0, Math.PI * 2); ctx.stroke();
+    }
+  }
+
   _drawBall(b) {
     const ctx = this.ctx;
     const [sx, sy] = this.w2s(b.x, b.y);
     const r = Math.max(4, b.radius * this.scale);
     const info = ballColor(b, this.snooker);
     const fill = rgb(info.fill);
+
+    // contact shadow on the cloth
+    ctx.beginPath();
+    ctx.ellipse(sx + r * 0.20, sy + r * 0.34, r * 0.96, r * 0.70, 0, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(0,0,0,.30)";
+    ctx.fill();
+
+    // snooker balls: plain glossy spheres, no numbers
+    if (this.snooker) {
+      const g = ctx.createRadialGradient(
+        sx - r * 0.40, sy - r * 0.44, r * 0.10,
+        sx + r * 0.12, sy + r * 0.26, r * 1.18);
+      g.addColorStop(0.00, shade(info.fill, 0.62));
+      g.addColorStop(0.42, fill);
+      g.addColorStop(1.00, shade(info.fill, -0.46));
+      ctx.beginPath(); ctx.arc(sx, sy, r, 0, Math.PI * 2);
+      ctx.fillStyle = g; ctx.fill();
+
+      // specular glint
+      ctx.beginPath();
+      ctx.ellipse(sx - r * 0.33, sy - r * 0.37, r * 0.26, r * 0.19,
+        -Math.PI / 4, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(255,255,255,.62)";
+      ctx.fill();
+
+      ctx.beginPath(); ctx.arc(sx, sy, r, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(0,0,0,.38)";
+      ctx.lineWidth = Math.max(0.7, r * 0.07);
+      ctx.stroke();
+      return;
+    }
 
     // base
     ctx.beginPath(); ctx.arc(sx, sy, r, 0, Math.PI * 2);
