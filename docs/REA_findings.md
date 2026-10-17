@@ -64,15 +64,20 @@
 - **8 球胜负（OBSERVATION, E3）**：当某一组（`solid`/`stripe`）的全部球都已落袋 → 该玩家胜（`groups[group].every(b => pocketed.includes(b))`）。
 - **斯诺克计分（INFERENCE，标准规则）**：red=1，yellow=2，green=3，brown=4，blue=5，pink=6，black=7；红→彩轮换，罚分取 max(犯规值, 对应球值)。是否完全照搬 bloob 仍待引擎块确认。
 
-## 5. Bot / AI（PARTIAL — 待引擎块定位后补全）
+## 5. Bot / AI（PARTIAL — 见 §8）
 - 各台球模式 `bots:!0`（OBSERVATION, E4）；难度为设置项（`botDifficulty`）。
 - bloob 的 AI 据推断为**前向模拟候选球 + 评分选杆**（依据：`simulatingPhysics` 状态 + 标准台球 AI 设计）。
-- **尚未提取**：候选生成方式、评分权重、难度分级曲线、旋转(english)是否真参与物理。→ 后台扫描正定位共享引擎块（含物理 + 很可能含 bot）以补全。
 
 ## 6. 未知 / 局限（UNKOWN）
-- 碰撞积分公式（自研 vs Matter.js 风格）— 引擎块未隔离前无法确认。
+- 碰撞积分公式（自研 vs Matter.js 风格）— 引擎块未静态定位，无法确认。
 - bot 评分函数与难度档 — 同上。
 - 旋转(english)是物理模拟还是纯表现层 — 待确认。
+
+## 8. 引擎/bot 源码未静态可达（重要结论）
+- 已下载：8ballpool 静态 HTML 的全部 `/assets/*.js`（41 个）+ 台球相关专用块（`Game-*`、`PoolGame`、`poolGeneric`、`poolRackLogic`、`usePoolResources`）+ `app` 引用的全部 116 个块（含 `engine_hunt/` 全量扫描）。
+- 物理引擎本体**不在任何静态块中**：`gravityScale/stiffness/solverIterations` 仅在配置块（E1/E2）出现，引擎不按字面读取这些键；也无 `.wasm`、无 `Matter/planck/box2d` 特征串。
+- **推断**：物理 + bot 引擎是**进房间时才由运行时按需加载的私有包**（或强混淆），不在公开静态部署里。
+- **处置（已与你确认"分析后自己重写"）**：物理用 §2/§3 常量 + 自写确定性步进引擎；bot 用"枚举候选(球,袋,接触点) → 自写模拟 → 评分"标准台球 AI 实现并校准难度。不搬运任何 bloob 源码/素材。
 
 ## 7. 复刻路线（我们怎么做）
 1. 用 §2/§3 的常量 + 自写**确定性步进 2D 物理**（top-down、无重力、圆-圆弹性碰撞、库边反弹、摩擦减速、袋口判定）。
