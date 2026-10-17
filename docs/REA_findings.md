@@ -62,7 +62,9 @@
 - 球组枚举：`solid(1-7)`、`stripe(9-15)`、`eightBall(8)`；斯诺克：`red(×15)`、`yellow/green/brown/blue/pink/black`。
 - **8 球犯规枚举（13 种）**：`CONSECUTIVE_FOULS_EXCEEDED`、`ILLEGAL_EIGHT_BALL_POCKET`、`ILLEGAL_EIGHT_BALL_POCKET_TOO_SOON`、`ILLEGAL_EIGHT_BALL_POCKET_ON_BREAK`、`CUE_BALL_POCKET`、`CUE_BALL_HIT_NO_BALL`、`CUE_BALL_HIT_WRONG_BALL`、`CUSHION_HIT_MIN_ON_BREAK`、`CUSHION_HIT_INVALID`、`POCKETED_WRONG_BALL`、`POCKETED_STRAY_COLOR`、`POCKETED_OWN_BALL`、`SKIP_TURN`。
 - **8 球胜负（OBSERVATION, E3）**：当某一组（`solid`/`stripe`）的全部球都已落袋 → 该玩家胜（`groups[group].every(b => pocketed.includes(b))`）。
-- **斯诺克计分（INFERENCE，标准规则）**：red=1，yellow=2，green=3，brown=4，blue=5，pink=6，black=7；红→彩轮换，罚分取 max(犯规值, 对应球值)。是否完全照搬 bloob 仍待引擎块确认。
+- **斯诺克计分（INFERENCE，标准规则）**：red=1，yellow=2，green=3，brown=4，blue=5，pink=6，black=7；罚分取 max(4, 犯规值, 对应球值)。是否完全照搬 bloob 仍待引擎块确认。
+- **斯诺克"on 球"简化（REIMPLEMENTATION 决策）**：标准规则每杆红→彩轮换；**我们的复刻为可玩性简化为"红球清空前始终 on red（不强制每杆轮换），红球清空后按黄→黑升序收彩"**。`src/rules_snooker.py` 的 `on_balls()` / `phase` 据此实现。
+- **斯诺克状态一致性（REIMPLEMENTATION 决策）**：红球一旦落袋即离台，**即便该杆犯规也同步递减 `reds_remaining`**（避免计数器与台面实际球数漂移导致 bot 追逐幽灵红球）；红球未清空前任何落袋的彩球一律重摆（不可留在台下）。
 
 ## 5. Bot / AI（复刻实现，见 §8）
 - 各台球模式 `bots:!0`（OBSERVATION, E4）；难度为设置项（`botDifficulty`）。
@@ -79,6 +81,7 @@
 - 旋转(english)是物理模拟还是纯表现层 — 待确认 → **当前未实现旋转（纯直线母球）**，留作后续。
 - `damping`(0.45) 的积分模型未知 → **采用标准每秒指数衰减** `v *= exp(-0.45·t)`（详见 `physics.py` 注释）；实测落点手感接近真实台球。
 - `hole.radius`(5/11) 小于球半径 → 字面复刻下球几乎无法落袋 → **落袋捕获半径放宽为 1.5× 球半径**（袋口"嘴"略宽），保证可玩；库边缺口(gap)取 1.1× 球半径。
+- 斯诺克状态一致性 → **红球落袋无论是否犯规都同步递减计数**；红球未清空前落袋彩球一律重摆（见 §4 "斯诺克状态一致性" 决策）。这是复刻过程中实测发现并修复的 bug（bot-vs-bot 时计数漂移导致卡死）。
 
 ## 8. 引擎/bot 源码未静态可达（重要结论）
 - 已下载：8ballpool 静态 HTML 的全部 `/assets/*.js`（41 个）+ 台球相关专用块（`Game-*`、`PoolGame`、`poolGeneric`、`poolRackLogic`、`usePoolResources`）+ `app` 引用的全部 116 个块（含 `engine_hunt/` 全量扫描）。

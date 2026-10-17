@@ -77,15 +77,15 @@ class SnookerGame:
         return self.world.cue_ball()
 
     def on_balls(self) -> List[Ball]:
-        """Balls that are legally 'on' for the current striker."""
+        """Balls that are legally 'on' for the current striker.
+
+        Simplified model: while any reds remain, a red is always 'on'
+        (we do not alternate red/colour per shot — see findings §4). Once the
+        reds are cleared, the lowest colour not yet down is 'on'.
+        """
         w = self.world
         if self.reds_remaining > 0:
-            if self.phase == "red":
-                return [b for b in w.balls if b.kind == "red" and not b.pocketed]
-            # phase == color: any colour still on the table
-            return [b for b in w.balls if b.kind == "color"
-                    and not b.pocketed and b.number not in self.colors_down]
-        # reds cleared: lowest colour not yet down
+            return [b for b in w.balls if b.kind == "red" and not b.pocketed]
         for val in COLOR_ORDER:
             if val not in self.colors_down:
                 return [b for b in w.balls if b.kind == "color"
@@ -188,34 +188,36 @@ class SnookerGame:
         if cue_sunk:
             fouls.append("IN_OFF")
 
-        # score / pot handling
+        # --- table state must stay consistent even when a foul occurs ---
+        # A red that is pocketed stays down (snooker rule) — decrement whether
+        # or not the shot was clean, otherwise the counter drifts out of sync
+        # with the balls actually on the table (caused the bot to chase
+        # phantom reds during bot-vs-bot play).
+        if potted_reds:
+            self.reds_remaining -= len(potted_reds)
+            if self.reds_remaining < 0:
+                self.reds_remaining = 0
+        # Any colour pocketed while reds remain must be re-spotted: it cannot
+        # legitimately stay down during the red phase (foul or not).
+        if self.reds_remaining > 0 and potted_colors:
+            self._respot_colors(potted_colors)
+        # Derive the "on" phase from the remaining reds (simplified model:
+        # reds are always "on" until cleared, then colours in ascending order).
+        self.phase = "red" if self.reds_remaining > 0 else "color"
+
+        # --- scoring & pot legality (only when no foul) ---
         scored = 0
         potted_correct = False
         if not fouls:
             if self.reds_remaining > 0:
-                if self.phase == "red":
-                    if potted_reds:
-                        scored += len(potted_reds)
-                        self.reds_remaining -= len(potted_reds)
-                        potted_correct = True
-                        # a single colour may be potted in the same shot (legal)
-                        if potted_colors:
-                            scored += max(potted_colors)
-                            self._respot_colors(potted_colors)
-                        # next "on" is red again, unless reds just cleared
-                        self.phase = "red" if self.reds_remaining > 0 else "color"
-                    elif potted_colors and not self.free_ball:
-                        # colour potted while reds remain and none potted => foul
-                        fouls.append("COLOUR_POTTED_EARLY")
-                else:  # phase color (a colour is "on" after a red)
-                    if potted_colors and not potted_reds:
-                        val = max(potted_colors)
-                        scored += val
-                        potted_correct = True
-                        self._respot_colors(potted_colors)
-                        self.phase = "red" if self.reds_remaining > 0 else "color"
-                    elif potted_reds:
-                        fouls.append("RED_POTTED_WHEN_COLOUR_ON")
+                # red phase: a red (optionally with one bonus colour) is "on"
+                if potted_reds:
+                    scored += len(potted_reds)
+                    potted_correct = True
+                    if potted_colors:
+                        scored += max(potted_colors)
+                elif potted_colors and not self.free_ball:
+                    fouls.append("COLOUR_POTTED_EARLY")
             else:
                 # end game: colours in ascending order
                 if potted_colors and not potted_reds:
@@ -229,6 +231,14 @@ class SnookerGame:
                             self._end_frame()
                     else:
                         fouls.append("WRONG_COLOUR_ORDER")
+                        self._respot_colors(potted_colors)
+                elif potted_reds:
+                    fouls.append("RED_POTTED_WHEN_COLOUR_ON")
+                    self._respot_colors(potted_colors)
+        else:
+            # foul: a colour pocketed in the end game must also be re-spotted
+            if self.reds_remaining == 0 and potted_colors:
+                self._respot_colors(potted_colors)
 
         # apply scoring / fouls
         if fouls:
