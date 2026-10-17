@@ -58,10 +58,38 @@ docs/REA_findings.md     reverse-engineering findings & modelling decisions
 
 ## How the AI works
 
-For every legal target ball × pocket it computes the **ghost-ball** contact point, checks that both the
-cue→ghost and target→pocket paths are clear, simulates the shot on a clone of the world, and scores the
-outcome. It picks the best makeable pot, or plays a safety when none exists. Difficulty tiers change aim
-noise and search depth. The physics is framework-agnostic, so the bot runs headless.
+**Pot search.** For every legal target ball × pocket it computes the **ghost-ball** contact point, checks
+that both the cue→ghost and target→pocket paths are clear, simulates the shot on a clone of the world, and
+scores the outcome.
+
+**Position play (走位).** Every simulated candidate also reports where the **cue ball came to rest**. The bot
+then scores that resting position by asking "is there a clean pot available from here?" — it re-runs the
+ghost-ball check from the new cue position against the balls that will be *on* next (group-aware for 8-ball,
+phase-aware for snooker). A pot that leaves a good angle gets a bonus; a pot that leaves the cue snookered
+gets a **penalty**, so the bot prefers a slightly harder pot that keeps position.
+
+**Escape shots.** When nothing can be potted (blocked line, i.e. snookered), it mirrors each target across
+every cushion to build **one-rail bank/kick** lines, simulates them, and plays the one that legally contacts
+the ball that is on. A plain safety is the last resort.
+
+Difficulty tiers change aim noise, search depth and power jitter. The physics is framework-agnostic, so the
+whole bot runs headless (that is how it is verified).
+
+## Standard snooker table
+
+The snooker table is built to real proportions rather than bloob's 1.85:1 field:
+
+| Item | Standard | In game |
+|---|---|---|
+| Playing surface | 3569 × 1778 mm (**2:1**) | 620 × 310 units |
+| Baulk line | 737 mm from baulk cushion (**0.2065 L**) | same fraction |
+| The D | 292 mm radius (**0.1636 W**) | same fraction |
+| Blue / pink / black | centre / 0.75 L / 324 mm off the top cushion | 0.5 / 0.75 / 0.9092 L |
+| Yellow, green, brown | corners + middle of the D | same |
+
+Rendering is standard snooker too: mahogany body, lighter rubber cushion band, green baize with a cloth
+sheen, baulk line + D, the six spots, corner pockets larger than the middles, and plain glossy unnumbered
+balls in the real snooker colours (ivory cue ball).
 
 ## Physics & rules highlights
 
@@ -94,6 +122,8 @@ The JavaScript port surfaced three genuine bugs that also affected the Python bu
 
 - **Logic (Node, headless): 14/14** — physics settles; a full 8-ball frame completes; **no ball ever leaves
   the table**; snooker reds decrement consistently; colours pot in ascending order.
+- **Position play & escapes (Node, headless): 6/6** — a deliberately snookered cue finds a one-rail kick that
+  contacts the ball on, stays on the table, and the 8-ball / snooker frames still finish.
 - **UI wiring (headless DOM/Canvas): 20/20** — menu → start → place → aim → shoot → resolve → bot turn, for
   both modes, plus the game-over overlay.
 - Screenshots above are real renders captured with headless Chrome.
@@ -107,7 +137,10 @@ The JavaScript port surfaced three genuine bugs that also affected the Python bu
 - [x] Snooker rules + AI
 - [x] pygame desktop UI
 - [x] **Zero-dependency offline web build (Canvas 2D)**
+- [x] Standard-proportion snooker table, markings and ball set
+- [x] Bot position play (走位) + one-rail escape shots
 - [x] Offline verification: 8-ball and snooker can be played to completion
+- [x] Hosted copies: GitHub Pages & WorkBuddy
 
 ## Disclaimer
 
@@ -120,7 +153,10 @@ Learning / engineering exercise. Gameplay inspiration comes from bloob.io (Kingl
 
 离线八球 / 斯诺克人机对战。现在提供**零依赖离线网页**：直接双击 `web/index.html` 即可在浏览器里玩，
 无需安装、无需本地服务器、全程无网络。原有 `src/`（Python + pygame）桌面版逻辑完全一致，保留可用。
-逆向结论、建模决策与三处移植中修复的 bug 见上文与 `docs/REA_findings.md`。
+斯诺克台面按**标准 2:1 比例**重建（开球线 0.2065L、D 区半径 0.1636W、粉球 0.75L、黑球 0.9092L），
+配木质台身、绿色台呢、开球线与 D 区、六个点位、角袋大于中袋、无色号的高光球体。
+bot 除 ghost-ball 进球搜索外，新增**走位评估**（打完球后母球是否还有清晰下一杆）与**一库解球**救球，
+被斯诺克时不再直接犯规。逆向结论、建模决策与移植中修复的 bug 见上文与 `docs/REA_findings.md`。
 
 ---
 
