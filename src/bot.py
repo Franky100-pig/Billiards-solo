@@ -24,7 +24,7 @@ import math
 import random
 from typing import Callable, List, Optional, Tuple
 
-from physics import World, Ball
+from physics import World, Ball, DAMPING
 
 DIFFICULTY = {
     "easy":   {"noise": 0.030, "top_k": 3, "power_jitter": 0.20},
@@ -78,9 +78,31 @@ def ghost_aim(cue: Ball, target: Ball, pocket: Tuple[float, float],
     return angle, (gx, gy)
 
 
+FRICTION_K = DAMPING
+POWER_MIN = 70.0        # softest usable tap
+POWER_MAX = 1350.0      # hardest break
+BREAK_8BALL = 950.0
+BREAK_SNOOKER = 520.0
+
+
+def power_for_pot(d1: float, d2: float, cut_cos: float = 1.0) -> float:
+    """Speed needed to send the cue `d1` units to the ghost ball and then the
+    object ball `d2` units on to the pocket at cut angle `cut_cos`.
+
+    With per-second exponential friction a ball coasts exactly v0 / k units, so
+    the stroke follows from the geometry. Only the normal component of the
+    impact transfers, so thin cuts need proportionally more cue speed. The old
+    flat heuristic (360 + 5.5 * distance) was an order of magnitude too hot and
+    saturated the cap on almost every shot.
+    """
+    cut = max(0.32, min(1.0, cut_cos))
+    need = FRICTION_K * (d1 + d2 / cut) + 40.0
+    return max(POWER_MIN, min(POWER_MAX, need))
+
+
 def power_for_distance(dist: float) -> float:
-    """Heuristic launch speed (u/s) to cover `dist` table-units and still pot."""
-    return min(1700.0, 360.0 + 5.5 * dist)
+    """Distance-only stroke (safeties and kicks)."""
+    return power_for_pot(dist, 0.0, 1.0)
 
 
 def reflect_point(px: float, py: float, ax: float, ay: float,
@@ -207,9 +229,15 @@ def enumerate_pots(world: World, cue: Ball, targets: List[Ball],
             wc = world.clone()
             wc.begin_shot()
             cc = wc.cue_ball()
-            dist = math.hypot(ghost[0] - cue.x, ghost[1] - cue.y) + \
-                   math.hypot(p[0] - t.x, p[1] - t.y)
-            wc.shoot(cc, angle, power_for_distance(dist))
+            # how square is the hit? the cue must arrive along the line of centres
+            ux, uy = math.cos(angle), math.sin(angle)
+            ndx, ndy = t.x - ghost[0], t.y - ghost[1]
+            nd = math.hypot(ndx, ndy) or 1.0
+            cut_cos = (ux * ndx + uy * ndy) / nd
+            d1 = math.hypot(ghost[0] - cue.x, ghost[1] - cue.y)
+            d2 = math.hypot(p[0] - t.x, p[1] - t.y)
+            power = power_for_pot(d1, d2, cut_cos)
+            wc.shoot(cc, angle, power)
             wc.simulate(h=1.0 / 300.0, max_steps=4500)
 
             cue_sunk = 0 in wc.pocketed_this_shot
@@ -227,6 +255,7 @@ def enumerate_pots(world: World, cue: Ball, targets: List[Ball],
                 "first": wc.first_contact,
                 "cue_sunk": cue_sunk,
                 "ghost": ghost, "cue_after": cue_after, "pos": pos,
+                "power": power, "cut": cut_cos,
             })
     return cands
 
@@ -257,7 +286,8 @@ def escape_shots(game, world: World, cue: Ball, targets: List[Ball],
                 continue
             angle = math.atan2(aim[1] - cue.y, aim[0] - cue.x)
             path = d1 + math.hypot(t.x - I[0], t.y - I[1])
-            power = min(1750.0, power_for_distance(path) * 1.18)
+            # the cushion eats 25% of the speed, so ask for slightly more
+            power = min(POWER_MAX, power_for_pot(path / 0.75, 0.0, 1.0))
             wc = world.clone()
             wc.begin_shot()
             wc.shoot(wc.cue_ball(), angle, power)
@@ -333,6 +363,19 @@ def score_snooker(game, c: dict) -> float:
 
 
 # -- public API ------------------------------------------------------------
+def is_break_shot(game) -> bool:
+    """True on the opening stroke, while the pack is still racked. The break is
+    the one shot where a full stroke is correct; every other shot is measured."""
+    if game.__class__.__name__ == "EightBallGame":
+        if game.ball_in_hand_kitchen:
+            return True
+        if len(game.pocketed) > 0:
+            return False
+        return all(b.number == 0 or b.pocketed or b.x > game.world.width * 0.55
+                   for b in game.world.balls)
+    return game.reds_remaining >= 15
+
+
 def choose_shot(game, difficulty: str = "medium") -> Tuple[float, float]:
     cfg = DIFFICULTY.get(difficulty, DIFFICULTY["medium"])
     world = game.world
@@ -342,6 +385,16 @@ def choose_shot(game, difficulty: str = "medium") -> Tuple[float, float]:
     r = world.ball_radius
     pockets = world.pockets
     targets = game.on_balls()
+
+    # 0) break: fire into the apex of the pack at a real break speed
+    if is_break_shot(game) and targets:
+        apex = max(targets, key=lambda t: t.x)
+        angle = math.atan2(apex.y - cue.y, apex.x - cue.x)
+        angle += random.gauss(0, cfg["noise"] * 0.5)
+        base = BREAK_8BALL if game.__class__.__name__ == "EightBallGame" \
+            else BREAK_SNOOKER
+        pw = base * (1.0 + random.gauss(0, cfg["power_jitter"] * 0.5))
+        return angle, max(POWER_MIN, min(POWER_MAX, pw))
 
     cands = enumerate_pots(
         world, cue, targets, pockets, r,
@@ -371,12 +424,10 @@ def choose_shot(game, difficulty: str = "medium") -> Tuple[float, float]:
         else:
             s, c = pool[0]
         angle = c["angle"] + random.gauss(0, cfg["noise"])
-        pw = power_for_distance(
-            math.hypot(c["ghost"][0] - cue.x, c["ghost"][1] - cue.y) +
-            math.hypot(c["pocket"][0] - _target_xy(game, c["target"])[0],
-                       c["pocket"][1] - _target_xy(game, c["target"])[1]))
-        pw *= (1.0 + random.gauss(0, cfg["power_jitter"]))
-        return angle, min(1800.0, max(250.0, pw))
+        # reuse the exact stroke the candidate was simulated with, so the bot's
+        # read of its own shot stays honest; jitter models a human's touch
+        pw = c["power"] * (1.0 + random.gauss(0, cfg["power_jitter"]))
+        return angle, min(POWER_MAX, max(POWER_MIN, pw))
 
     # 2) nothing worth potting -> try a one-rail escape before a plain safety
     if targets:
@@ -415,5 +466,6 @@ def safety_shot(game, cue: Ball, targets: List[Ball], r: float,
     _, best_d, best = reachable[0]
     angle = math.atan2(best.y - cue.y, best.x - cue.x)
     angle += random.gauss(0, cfg["noise"] * 1.5)
-    pw = min(900.0, 320.0 + 3.0 * best_d) * (1.0 + random.gauss(0, cfg["power_jitter"]))
-    return angle, max(250.0, pw)
+    pw = min(POWER_MAX, FRICTION_K * best_d * 1.25 + 45.0) \
+        * (1.0 + random.gauss(0, cfg["power_jitter"]))
+    return angle, max(POWER_MIN, pw)

@@ -63,8 +63,38 @@ function ghostAim(cue, target, pocket, r) {
   return [angle, [gx, gy]];
 }
 
+/**
+ * Power model.
+ *
+ * With per-second exponential friction v(t) = v0 * exp(-k t) a ball coasts
+ * exactly v0 / k table units before it parks, so the speed needed to cover a
+ * distance is simply k * distance. The old heuristic (360 + 5.5 * distance)
+ * was ~10x too hot and saturated the cap on almost every shot — which is
+ * exactly why the bot used to smash everything at maximum power. Deriving the
+ * stroke from the geometry gives short, positional strokes for short pots and
+ * a full stroke only when the table actually demands one.
+ */
+const FRICTION_K = (typeof DAMPING === "number") ? DAMPING : 0.45;
+const POWER_MIN = 70.0;      // softest usable tap
+const POWER_MAX = 1350.0;    // hardest break
+const BREAK_8BALL = 950.0;
+const BREAK_SNOOKER = 520.0;
+
+/**
+ * Speed required to send the cue `d1` units to the ghost ball and then the
+ * object ball `d2` units on to the pocket at a cut angle of `cutCos`
+ * (1 = dead straight, 0 = impossible thin cut). Only the normal component of
+ * the impact transfers, so thin cuts need proportionally more cue speed.
+ */
+function powerForPot(d1, d2, cutCos = 1.0) {
+  const cut = Math.max(0.32, Math.min(1.0, cutCos));
+  const need = FRICTION_K * (d1 + d2 / cut) + 40.0;
+  return Math.max(POWER_MIN, Math.min(POWER_MAX, need));
+}
+
+/** Keep the old name working (distance-only strokes: safeties, kicks). */
 function powerForDistance(dist) {
-  return Math.min(1700.0, 360.0 + 5.5 * dist);
+  return powerForPot(dist, 0.0, 1.0);
 }
 
 /** Mirror point p across the line a->b (used for one-rail bank shots). */
@@ -176,9 +206,15 @@ function enumeratePots(world, cue, targets, pockets, r, posFn) {
       const wc = world.clone();
       wc.beginShot();
       const cc = wc.cueBall();
-      const dist = Math.hypot(ghost[0] - cue.x, ghost[1] - cue.y)
-        + Math.hypot(p[0] - t.x, p[1] - t.y);
-      wc.shoot(cc, angle, powerForDistance(dist));
+      // how square is the hit? the cue has to arrive along the line of centres
+      const ux = Math.cos(angle), uy = Math.sin(angle);
+      const ndx = t.x - ghost[0], ndy = t.y - ghost[1];
+      const nd = Math.hypot(ndx, ndy) || 1.0;
+      const cutCos = (ux * ndx + uy * ndy) / nd;
+      const d1 = Math.hypot(ghost[0] - cue.x, ghost[1] - cue.y);
+      const d2 = Math.hypot(p[0] - t.x, p[1] - t.y);
+      const power = powerForPot(d1, d2, cutCos);
+      wc.shoot(cc, angle, power);
       wc.simulate(1.0 / 300.0, 4500);
 
       const cue_sunk = wc.pocketed_this_shot.includes(0);
@@ -194,6 +230,7 @@ function enumeratePots(world, cue, targets, pockets, r, posFn) {
         pocketed: wc.pocketed_this_shot.slice(),
         first: wc.first_contact,
         cue_sunk, ghost, cue_after, pos,
+        power, cut: cutCos,
       });
     }
   }
@@ -229,9 +266,11 @@ function escapeShots(game, world, cue, targets, r, posFn) {
 
       const angle = Math.atan2(aim[1] - cue.y, aim[0] - cue.x);
       const path = d1 + Math.hypot(t.x - I[0], t.y - I[1]);
+      // the cushion eats 25% of the speed, so ask for slightly more
+      const power = Math.min(POWER_MAX, powerForPot(path / 0.75, 0.0, 1.0));
       const wc = world.clone();
       wc.beginShot();
-      wc.shoot(wc.cueBall(), angle, Math.min(1750.0, powerForDistance(path) * 1.18));
+      wc.shoot(wc.cueBall(), angle, power);
       wc.simulate(1.0 / 300.0, 4500);
 
       const cue_sunk = wc.pocketed_this_shot.includes(0);
@@ -244,7 +283,7 @@ function escapeShots(game, world, cue, targets, r, posFn) {
       else if (wc.first_contact === null) sc -= 60.0;
       else if (!targets.some(x => x.number === wc.first_contact)) sc -= 120.0;
       else { sc += 30.0; sc += pos * 0.5; }
-      out.push({ score: sc, angle, power: Math.min(1750.0, powerForDistance(path) * 1.18) });
+      out.push({ score: sc, angle, power });
     }
   }
   return out;
@@ -288,6 +327,20 @@ function scoreSnooker(game, c) {
 }
 
 // --- public API ----------------------------------------------------------
+/**
+ * True on the opening stroke, while the pack is still racked. The break is the
+ * one shot where a full stroke is correct; every other shot is measured.
+ */
+function isBreakShot(game) {
+  if (game.game_type === "8ball") {
+    if (game.ball_in_hand_kitchen) return true;
+    if (game.pocketed.size > 0) return false;
+    return game.world.balls.every(b => b.number === 0 || b.pocketed
+      || b.x > game.world.width * 0.55);
+  }
+  return game.reds_remaining >= 15;
+}
+
 function chooseShot(game, difficulty = "medium") {
   const cfg = DIFFICULTY[difficulty] || DIFFICULTY.medium;
   const world = game.world;
@@ -296,6 +349,17 @@ function chooseShot(game, difficulty = "medium") {
   const r = world.ball_radius;
   const pockets = world.pockets;
   const targets = game.on_balls();
+
+  // 0) break: fire into the apex of the pack at a real break speed
+  if (isBreakShot(game) && targets.length > 0) {
+    let apex = targets[0];
+    for (const t of targets) if (t.x > apex.x) apex = t;
+    let angle = Math.atan2(apex.y - cue.y, apex.x - cue.x);
+    angle += randGauss(0, cfg.noise * 0.5);
+    const base = game.game_type === "8ball" ? BREAK_8BALL : BREAK_SNOOKER;
+    const pw = base * (1.0 + randGauss(0, cfg.power_jitter * 0.5));
+    return [angle, Math.max(POWER_MIN, Math.min(POWER_MAX, pw))];
+  }
 
   const posFn = (wc, cueAfter, potted) => positionBonus(game, wc, cueAfter, potted, r);
 
@@ -321,12 +385,10 @@ function chooseShot(game, difficulty = "medium") {
       c = pool[0][1];
     }
     const angle = c.angle + randGauss(0, cfg.noise);
-    const tpos = targetXY(game, c.target);
-    const pw = powerForDistance(
-      Math.hypot(c.ghost[0] - cue.x, c.ghost[1] - cue.y)
-      + Math.hypot(c.pocket[0] - tpos[0], c.pocket[1] - tpos[1]));
-    const pw2 = pw * (1.0 + randGauss(0, cfg.power_jitter));
-    return [angle, Math.min(1800.0, Math.max(250.0, pw2))];
+    // reuse the exact stroke the candidate was simulated with, so the bot's
+    // read of its own shot stays honest; jitter models a human's touch
+    const pw = c.power * (1.0 + randGauss(0, cfg.power_jitter));
+    return [angle, Math.min(POWER_MAX, Math.max(POWER_MIN, pw))];
   }
 
   // 2) nothing worth potting -> try a one-rail escape before a plain safety
@@ -366,8 +428,10 @@ function safetyShot(game, cue, targets, r, cfg, world) {
   const t = best[2];
   let angle = Math.atan2(t.y - cue.y, t.x - cue.x);
   angle += randGauss(0, cfg.noise * 1.5);
-  const pw = Math.min(900.0, 320.0 + 3.0 * best[1]) * (1.0 + randGauss(0, cfg.power_jitter));
-  return [angle, Math.max(250.0, pw)];
+  // a safety is a touch shot: enough to reach the ball and push it to a rail
+  const base = Math.min(POWER_MAX, FRICTION_K * best[1] * 1.25 + 45.0);
+  const pw = base * (1.0 + randGauss(0, cfg.power_jitter));
+  return [angle, Math.max(POWER_MIN, pw)];
 }
 
 if (typeof module !== "undefined" && module.exports) {
@@ -375,5 +439,7 @@ if (typeof module !== "undefined" && module.exports) {
     DIFFICULTY, POSITION, chooseShot, enumeratePots, escapeShots,
     score8ball, scoreSnooker, safetyShot, positionQuality, positionBonus,
     nextTargets, botSeed, rand01, randGauss,
+    powerForPot, powerForDistance, isBreakShot,
+    POWER_MIN, POWER_MAX, BREAK_8BALL, BREAK_SNOOKER,
   };
 }
