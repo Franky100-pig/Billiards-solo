@@ -15,10 +15,36 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional
 
-from physics import Ball, make_snooker_world
+from physics import (Ball, make_snooker_world,
+                     SNOOKER_BAULK_X, SNOOKER_D_RADIUS,
+                     SNOOKER_BLACK_X, SNOOKER_PINK_X)
 
 COLOR_VALUES = {2: "yellow", 3: "green", 4: "brown", 5: "blue", 6: "pink", 7: "black"}
 COLOR_ORDER = [2, 3, 4, 5, 6, 7]   # ascending, end-game sequence
+
+
+def snooker_spots(W: float, H: float) -> dict:
+    """Standard snooker spots on a W x H playing surface.
+
+    Baulk line at 0.2065 L, D radius 0.1636 W, blue dead centre, pink at
+    0.75 L (midway centre -> top cushion), black at 0.9092 L (324 mm off the
+    top cushion). Yellow / green sit on the corners of the D, brown in its
+    middle.
+    """
+    baulk = W * SNOOKER_BAULK_X
+    d_r = H * SNOOKER_D_RADIUS
+    return {
+        "baulk_x": baulk,
+        "d_radius": d_r,
+        "colors": {
+            2: (baulk, H * 0.5 + d_r),          # yellow
+            3: (baulk, H * 0.5 - d_r),          # green
+            4: (baulk, H * 0.5),                # brown
+            5: (W * 0.5, H * 0.5),              # blue
+            6: (W * SNOOKER_PINK_X, H * 0.5),   # pink
+            7: (W * SNOOKER_BLACK_X, H * 0.5),  # black
+        },
+    }
 
 
 class SnookerGame:
@@ -44,32 +70,23 @@ class SnookerGame:
         w = self.world
         r = w.ball_radius
         W, H = w.width, w.height
-        baulk_x = W * 0.25
-        spots = {
-            2: (baulk_x, H * 0.70),
-            3: (baulk_x, H * 0.30),
-            4: (baulk_x, H * 0.50),
-            5: (W * 0.50, H * 0.50),
-            6: (W * 0.72, H * 0.50),
-            7: (W * 0.90, H * 0.50),
-        }
+        spots = snooker_spots(W, H)
         # colours
-        for val, (sx, sy) in spots.items():
+        for val, (sx, sy) in spots["colors"].items():
             b = Ball(sx, sy, r, number=val, kind="color")
             w.add_ball(b)
         # reds: apex faces the baulk end (left), the pack widens toward black
-        apex_x = W * 0.75
+        apex_x = spots["colors"][6][0] + 2 * r + 0.4
         apex_y = H * 0.50
-        idx = 0
         for row in range(5):
             x = apex_x + row * r * math.sqrt(3.0)
             for j in range(row + 1):
                 y = apex_y + (j - row / 2.0) * 2.0 * r
                 b = Ball(x, y, r, number=1, kind="red")
                 w.add_ball(b)
-                idx += 1
-        # cue ball in the D (offset from the brown spot so they don't overlap)
-        cue = Ball(baulk_x + r * 3, H * 0.50, r, number=0, kind="cue")
+        # cue ball starts INSIDE the D (rule 3.3: the striker plays from in the D)
+        cue = Ball(spots["baulk_x"] - spots["d_radius"] * 0.45,
+                   H * 0.50 + spots["d_radius"] * 0.55, r, number=0, kind="cue")
         w.add_ball(cue)
 
     # -- queries -----------------------------------------------------------
@@ -117,13 +134,11 @@ class SnookerGame:
             return False
         w = self.world
         r = w.ball_radius
-        baulk_x = w.width * 0.25
-        # must be inside the D (baulk line, right of it, within semicircle radius)
-        if not (baulk_x - r <= x <= baulk_x + w.height * 0.5 + r):
-            return False
+        spots = snooker_spots(w.width, w.height)
         if not (r <= y <= w.height - r):
             return False
-        if math.hypot(x - baulk_x, y - w.height / 2.0) > w.height * 0.5 + r:
+        # rule: the cue ball must be played from inside the D
+        if math.hypot(x - spots["baulk_x"], y - w.height / 2.0) > spots["d_radius"]:
             return False
         for b in w.balls:
             if b.kind == "cue" or b.pocketed:
@@ -158,7 +173,9 @@ class SnookerGame:
 
     def auto_place_cue(self) -> None:
         w = self.world
-        self.place_cue(w.width * 0.25, w.height / 2.0)
+        spots = snooker_spots(w.width, w.height)
+        self.place_cue(spots["baulk_x"] - spots["d_radius"] * 0.50,
+                       w.height / 2.0 + spots["d_radius"] * 0.55)
 
     # -- evaluation --------------------------------------------------------
     def _evaluate(self) -> dict:
@@ -277,9 +294,7 @@ class SnookerGame:
         w = self.world
         r = w.ball_radius
         W, H = w.width, w.height
-        baulk_x = W * 0.25
-        spots = {2: (baulk_x, H*0.70), 3: (baulk_x, H*0.30), 4: (baulk_x, H*0.50),
-                 5: (W*0.50, H*0.50), 6: (W*0.72, H*0.50), 7: (W*0.90, H*0.50)}
+        spots = snooker_spots(W, H)["colors"]
         for v in vals:
             b = next((x for x in w.balls if x.number == v and x.kind == "color"), None)
             if b is None:
@@ -301,18 +316,19 @@ class SnookerGame:
     def _respot_cue(self) -> None:
         w = self.world
         r = w.ball_radius
-        baulk_x = w.width * 0.25
+        spots = snooker_spots(w.width, w.height)
         cue = self.cue()
         if cue is None:
             cue = Ball(0, 0, r, number=0, kind="cue")
             w.add_ball(cue)
-        x, y = baulk_x, w.height * 0.50
+        x = spots["baulk_x"] - spots["d_radius"] * 0.50
+        y = w.height * 0.50 + spots["d_radius"] * 0.55
         while any(b is not cue and not b.pocketed and
                   math.hypot(b.x - x, b.y - y) < 2*r for b in w.balls):
             y += r
-            if y > w.height - r:
-                y = w.height * 0.50
-                x += r
+            if y > w.height * 0.5 + spots["d_radius"]:
+                y = w.height * 0.5 - spots["d_radius"] * 0.6
+                x -= r
         cue.x, cue.y = x, y
         cue.pocketed = False
         cue.vx = cue.vy = 0.0

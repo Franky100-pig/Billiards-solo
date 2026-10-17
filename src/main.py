@@ -20,7 +20,7 @@ import sys
 
 import pygame
 
-from physics import Ball
+from physics import Ball, SNOOKER_BAULK_X, SNOOKER_D_RADIUS
 from rules_eightball import EightBallGame
 from rules_snooker import SnookerGame
 import bot as botmod
@@ -43,17 +43,23 @@ EIGHT_COLORS = {
     1: (240, 205, 45), 2: (40, 70, 200), 3: (210, 45, 45), 4: (150, 45, 200),
     5: (225, 130, 35), 6: (40, 165, 70), 7: (155, 45, 45), 8: (22, 22, 22),
 }
-# snooker colours (number -> rgb and label)
+# snooker colours (number -> rgb), standard ball set
 SNOOKER_COLORS = {
-    1: (205, 45, 45), 2: (235, 210, 45), 3: (40, 165, 70), 4: (150, 95, 45),
-    5: (45, 95, 215), 6: (240, 150, 185), 7: (22, 22, 22),
+    1: (188, 32, 44),    # red
+    2: (242, 200, 68),   # yellow
+    3: (18, 116, 58),    # green
+    4: (120, 72, 32),    # brown
+    5: (18, 70, 162),    # blue
+    6: (230, 122, 152),  # pink
+    7: (24, 24, 24),     # black
 }
+SNOOKER_CUE = (247, 243, 232)   # ivory cue ball
 
 
 def ball_color(b: Ball, snooker: bool):
     """Return (fill_rgb, is_stripe)."""
     if b.kind == "cue":
-        return (235, 235, 235), False
+        return (SNOOKER_CUE if snooker else (235, 235, 235)), False
     if snooker:
         return SNOOKER_COLORS.get(b.number, (200, 200, 200)), False
     if b.number in (9, 10, 11, 12, 13, 14, 15):
@@ -315,14 +321,14 @@ class App:
         pygame.draw.rect(self.screen, (22, 92, 46),
                          pygame.Rect(x0 - RAIL, y0 - RAIL, tw + 2 * RAIL, th + 2 * RAIL))
         pygame.draw.rect(self.screen, (15, 70, 35), pygame.Rect(x0, y0, tw, th))
-        # baulk line + D for snooker
+        # baulk line + D for snooker (standard positions, see physics constants)
         if self.snooker:
-            bx = self.ox + w.width * 0.25 * self.scale
+            bx = self.ox + w.width * SNOOKER_BAULK_X * self.scale
+            dr = w.height * SNOOKER_D_RADIUS * self.scale
             pygame.draw.line(self.screen, (210, 210, 210), (bx, y0), (bx, y0 + th), 2)
             cy = y0 + th / 2
-            r = th * 0.5
             pygame.draw.arc(self.screen, (210, 210, 210),
-                           pygame.Rect(bx - r, cy - r, 2 * r, 2 * r),
+                           pygame.Rect(bx - dr, cy - dr, 2 * dr, 2 * dr),
                            -math.pi / 2, math.pi / 2, 2)
         # pockets
         for px, py in w.pockets:

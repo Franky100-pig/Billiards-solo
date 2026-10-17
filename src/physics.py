@@ -31,9 +31,22 @@ BALL_RADIUS_8BALL = 11.0
 POCKET_RADIUS_8BALL = 11.0
 FIELD_8BALL = (572.0, 330.0)
 
+# Snooker uses STANDARD table proportions: a 12ft table plays 3569 x 1778 mm,
+# i.e. exactly 2:1, with 52.5 mm balls. bloob's own snooker field is 572 x 310
+# (1.85:1) which does not look like a real snooker table, so we use the standard
+# ratio instead. At a 620-unit playing surface the ball is ~9.1 units; we take
+# 8.5 so the 15-red triangle still clears the black spot.
 BALL_RADIUS_SNOOKER = 8.5
-POCKET_RADIUS_SNOOKER = 5.0
-FIELD_SNOOKER = (572.0, 310.0)
+POCKET_RADIUS_SNOOKER = 7.5
+FIELD_SNOOKER = (620.0, 310.0)
+
+# Standard snooker markings, as fractions of the playing surface:
+# baulk line at 1/5 of the length, D radius 292 mm (0.1636 of the width), black
+# spot 324 mm off the top cushion, pink halfway centre -> top cushion.
+SNOOKER_BAULK_X = 0.2065
+SNOOKER_D_RADIUS = 0.1636
+SNOOKER_BLACK_X = 0.9092
+SNOOKER_PINK_X = 0.75
 
 MASS = 3.0
 RESTITUTION_BALL = 0.9
@@ -356,15 +369,14 @@ def make_8ball_world() -> World:
 
 
 def make_snooker_world() -> World:
-    # snooker pockets (findings E2), converted from center-origin to [0,W]x[0,H]
-    g, _ = 572.0, 310.0
-    cx, cy = g / 2.0, _ / 2.0
-    raw = [
-        (g / 2 - 5, _ / 2 - 5), (0, _ / 2 - 2.5), (-g / 2 + 5, _ / 2 - 5),
-        (g / 2 - 5, -_ / 2 + 5), (0, -_ / 2 + 2.5), (-g / 2 + 5, -_ / 2 + 5),
+    W, H = FIELD_SNOOKER
+    # Standard pockets: four corners plus the two middle pockets on the long
+    # rails (which is why a snooker table is not a simple 6-hole rectangle).
+    pockets = [
+        (0.0, 0.0), (W / 2.0, 0.0), (W, 0.0),
+        (0.0, H), (W / 2.0, H), (W, H),
     ]
-    pockets = [(cx + x, cy + y) for (x, y) in raw]
-    return World(g, _, BALL_RADIUS_SNOOKER, POCKET_RADIUS_SNOOKER, pockets)
+    return World(W, H, BALL_RADIUS_SNOOKER, POCKET_RADIUS_SNOOKER, pockets)
 
 
 if __name__ == "__main__":
