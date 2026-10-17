@@ -7,8 +7,10 @@ const SOLIDS = [1, 2, 3, 4, 5, 6, 7];      // 1-7
 const STRIPES = [9, 10, 11, 12, 13, 14, 15]; // 9-15
 const EIGHT = 8;
 
-// fixed rack order (apex first), 8 in the centre of the triangle
-const RACK_ORDER = [1, 9, 2, 10, 8, 11, 3, 12, 4, 13, 5, 14, 6, 15, 7];
+// Fixed rack order (apex first). Rules for a legal rack: the 8 sits in the
+// middle of the third row and the two back corners are one solid and one
+// stripe — hence 5 (solid) and 15 (stripe) at the ends of the last row.
+const RACK_ORDER = [1, 9, 2, 10, 8, 11, 3, 12, 4, 13, 5, 14, 6, 7, 15];
 
 class EightBallGame {
   constructor(human_is_player = 0) {

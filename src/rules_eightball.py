@@ -26,8 +26,10 @@ SOLIDS = list(range(1, 8))        # 1-7
 STRIPES = list(range(9, 16))      # 9-15
 EIGHT = 8
 
-# fixed rack order (apex first), 8 in the centre of the triangle
-RACK_ORDER = [1, 9, 2, 10, 8, 11, 3, 12, 4, 13, 5, 14, 6, 15, 7]
+# Fixed rack order (apex first). A legal rack puts the 8 in the middle of the
+# third row and one solid + one stripe in the two back corners — hence 5
+# (solid) and 15 (stripe) at the ends of the last row.
+RACK_ORDER = [1, 9, 2, 10, 8, 11, 3, 12, 4, 13, 5, 14, 6, 7, 15]
 
 
 class EightBallGame:
