@@ -8,6 +8,15 @@ source or art is copied).
 
 ![Menu](docs/screenshots/menu.png)
 
+## Play online
+
+| Host | Link |
+|---|---|
+| GitHub Pages | <https://franky100-pig.github.io/Billiards-solo/> |
+| WorkBuddy | <https://billiards-solo.app.workbuddy.host/> |
+
+Both serve the same static build from `web/` — no backend, no cookies, no tracking.
+
 ## Play — offline web (recommended)
 
 No install, no local server, no network:
