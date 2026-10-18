@@ -29,6 +29,11 @@ No install, no local server, no network:
 |---|---|
 | ![8-ball](docs/screenshots/8ball.png) | ![snooker](docs/screenshots/snooker.png) |
 
+Four presses of **↓** put the tip on the bottom of the dial — the dot sits at 6 o'clock and the stroke is a
+draw. This is the same dial the stroke animation and the physics read, not a separate indicator:
+
+![draw, dialled with the down arrow](docs/screenshots/english.png)
+
 ### Controls
 - **Ball-in-hand** — click/tap inside the allowed area to place the cue ball.
 - **Aim** — just move the cursor. The aim is the ray **from the cue ball to the pointer**, so the line,
@@ -36,9 +41,11 @@ No install, no local server, no network:
 - **Power** — press anywhere to **lock** that direction, then drag **back** along the cue and release. The
   shot only ever uses the backward component of the drag, so loading power cannot change where you are
   pointing; a sideways or forward drag loads nothing. **Right-click** puts a loaded cue back down.
-- **English (加塞)** — click inside the spin dial on the right to move the strike point. Drag the dot to the
-  bottom and the shot is a **draw**, to the top a **follow**, left/right gives **side spin**. Double-click the
-  dial (or press **S**) to re-centre it. The cue itself is drawn off-centre, matching the strike point.
+- **English (加塞)** — click/drag inside the spin dial on the right, or walk the tip with **↑ ↓ ← →**
+  (up = follow, down = draw, left/right = side spin; **Shift** = a fine 0.05 step). The tip cannot leave
+  the ball: overshooting slides it along the rim. **S** or a double-click re-centres, and **every stroke
+  resets the tip to dead centre on its own** — english is consumed by the shot it was dialled in for and
+  can never leak into the next one. The cue itself is drawn off-centre, matching the strike point.
 - **R / Esc** — back to the menu.
 
 This is how bloob's own input works: its `power(start, end, angle)` helper throws the pull away unless it is
@@ -212,12 +219,19 @@ The JavaScript port surfaced three genuine bugs that also affected the Python bu
   coasting ball's speed follows `v₀·e^(−0.45 t)` to within a few per cent.
 - **Position play & escapes (Node, headless): 6/6** — a deliberately snookered cue finds a one-rail kick that
   contacts the ball on, stays on the table, and the 8-ball / snooker frames still finish.
-- **UI wiring (headless DOM/Canvas): 41/41** — menu → start → place → aim → pull → strike → resolve → bot
+- **UI wiring (headless DOM/Canvas): 64/64** — menu → start → place → aim → pull → strike → resolve → bot
   turn, for both modes, plus the game-over overlay, a monotonic power curve from a soft tap to a full stroke,
   the spin dial setting the strike point, and ball-in-hand on both tables. The aim/power split has its own
   cases: pointing right aims right (not left), pointing up aims up, jitter sitting on the ball is ignored,
   pressing does not move the aim, the aim is identical before and after a full pull, and sideways/forward
   drags load exactly zero power.
+- **Keyboard english (same suite)** — ↑ adds exactly one follow step and no side spin, ↓ undoes it to the
+  bit, shift is a five-times finer step, twenty presses of ↑ park the tip at 12 o'clock and never off the
+  ball, coming off the rim stays on the rim, arrows are prevented from scrolling the page and are inert
+  while the balls roll, S re-centres, and **a stroke leaves the dial at dead centre**. End-to-end: the same
+  shot fired from the centre and after five ↓ differ *only* in spin — the centre ball leaves with no rolling
+  spin at all, the down-arrow ball leaves with a real backspin, and both settle without anything leaving the
+  table.
 - Screenshots above are real renders captured with headless Chrome.
 
 The bot search is a **generator** that is drained in ~7 ms slices per frame, so choosing a shot never freezes
@@ -281,8 +295,11 @@ bot 除 ghost-ball 进球搜索外，新增**走位评估**（打完球后母球
 被甩偏；库边同样有切向冲量（`μ = 0.17`），侧旋会真的改变反弹角，而不是装饰。球只有在**速度和滑移都
 很小**时才会停下，所以"看着不动但还有后旋"的球会继续咬地往回滚。
 
-**加塞**：右侧旋钮点一下就把击球点挪过去，拖到下面是**低杆**、上面是**高杆**、左右是**侧塞**，双击
-（或按 S）回中；球杆画出来时也会偏离球心，和击球点一致。击球点偏移 `h` 直接决定角速度 `w = 2.5·h·v/r`。
+**加塞**：右侧旋钮点一下就把击球点挪过去，拖到下面是**低杆**、上面是**高杆**、左右是**侧塞**；也可以
+直接用 **↑ ↓ ← →** 一格一格走（每格 0.2 个球半径，按住 **Shift** 变成 0.05 的细调）。击球点不会走出球
+体——越界会被投影回圆周上，所以一直按住 ↑ 会稳稳停在 12 点方向，而不是乱跳。双击旋钮或按 **S** 回中；
+**每打完一杆都会自动回到正中心**，这杆调的塞不会被带到下一杆去。球杆画出来时也会偏离球心，和击球点
+一致。击球点偏移 `h` 直接决定角速度 `w = 2.5·h·v/r`：正中心是定杆，往下四格就是真低杆。
 
 **进袋**：进袋不再"一帧消失"。球会滑进袋口最后几个单位、缩小、淡出，并在一道裁剪到袋口的袋沿阴影下
 消失，同时袋口泛起涟漪、附近台呢变暗；碰撞点还会溅出一圈短促的火花点，能看清是哪两颗球撞了、多重。
