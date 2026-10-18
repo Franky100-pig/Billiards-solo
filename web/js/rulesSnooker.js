@@ -132,19 +132,19 @@ class SnookerGame {
     return true;
   }
 
-  take_shot(angle, power) {
+  take_shot(angle, power, spin = null) {
     if (this.winner !== null) return { error: "frame over" };
     const cue = this.cue();
     if (cue === null) return { error: "cue not on table — place it first" };
-    this.launch(angle, power);
+    this.launch(angle, power, spin);
     this.world.simulate();
     return this.resolve_shot();
   }
 
-  launch(angle, power) {
+  launch(angle, power, spin = null) {
     const cue = this.cue();
     this.world.beginShot();
-    this.world.shoot(cue, angle, power);
+    this.world.shoot(cue, angle, power, spin);
   }
 
   resolve_shot() {
