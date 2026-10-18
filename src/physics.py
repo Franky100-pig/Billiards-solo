@@ -136,6 +136,8 @@ class World:
         self.first_contact: Optional[int] = None      # ball number cue hit first
         self.pocketed_this_shot: List[int] = []        # ball numbers pocketed this shot
         self.rail_hit: set = set()                     # ball numbers that touched a cushion
+        self.rail_after_contact = False                # did anything reach a rail once
+                                                       # the cue ball had met a ball?
         # cushion segments leave a "mouth" gap near each pocket so balls drop
         # instead of bouncing on the rail right next to a pocket.
         self.cushions = self._build_cushions(gap=self.gap)
@@ -219,22 +221,22 @@ class World:
             b.x = r
             if b.vx < 0:
                 b.vx = -b.vx * e
-                self.rail_hit.add(b.number)
+                self._touched_rail(b)
         elif b.x > W - r:
             b.x = W - r
             if b.vx > 0:
                 b.vx = -b.vx * e
-                self.rail_hit.add(b.number)
+                self._touched_rail(b)
         if b.y < r:
             b.y = r
             if b.vy < 0:
                 b.vy = -b.vy * e
-                self.rail_hit.add(b.number)
+                self._touched_rail(b)
         elif b.y > H - r:
             b.y = H - r
             if b.vy > 0:
                 b.vy = -b.vy * e
-                self.rail_hit.add(b.number)
+                self._touched_rail(b)
 
     def simulate(self, h: float = 1.0 / 480.0, max_steps: int = 8000) -> int:
         """Run until all balls rest or max_steps reached. Returns steps used."""
@@ -251,6 +253,7 @@ class World:
         self.first_contact = None
         self.pocketed_this_shot = []
         self.rail_hit = set()
+        self.rail_after_contact = False
 
     def all_resting(self) -> bool:
         for b in self.balls:
@@ -315,6 +318,18 @@ class World:
                 return True
         return False
 
+    def _touched_rail(self, b: Ball) -> None:
+        """Record a rail contact, and whether it happened after the first ball.
+
+        The rules need both facts: which balls reached a cushion (four-ball
+        break rule) and whether it happened after the cue ball first met an
+        object ball, which is what separates a legal shot from one too soft to
+        reach anything.
+        """
+        self.rail_hit.add(b.number)
+        if self.first_contact is not None:
+            self.rail_after_contact = True
+
     def _collide_cushions(self, b: Ball) -> None:
         r = b.radius
         # inside the pocket "jaws": don't bounce off the rail end, let it drop
@@ -338,7 +353,7 @@ class World:
                 e = self.restitution_cushion
                 b.vx -= (1.0 + e) * vn * nx
                 b.vy -= (1.0 + e) * vn * ny
-                self.rail_hit.add(b.number)
+                self._touched_rail(b)
 
     # -- shots -------------------------------------------------------------
     def shoot(self, ball: Ball, angle: float, speed: float) -> None:

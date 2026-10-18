@@ -172,6 +172,11 @@ class App:
             wx, wy = self.s2w(*pos)
             if self.game.place_cue(wx, wy):
                 self.await_place = False
+            else:
+                # say why: a click that does nothing is the worst possible answer
+                why = getattr(self.game, "place_refusal", lambda x, y: None)(wx, wy)
+                if why:
+                    self.game.message = why
             return
         if not self.simulating and self._human_turn():
             self.begin_pull(pos)
@@ -376,6 +381,21 @@ class App:
             pygame.draw.arc(self.screen, (210, 210, 210),
                            pygame.Rect(bx - dr, cy - dr, 2 * dr, 2 * dr),
                            -math.pi / 2, math.pi / 2, 2)
+        # head string: the break is played from the quarter behind this line, so
+        # shade it (and brighten the line) while the player is choosing a spot
+        if not self.snooker:
+            hx = self.ox + self.game.head_string() * self.scale
+            placing = self.await_place and getattr(self.game, "ball_in_hand_kitchen", False)
+            if placing:
+                shade = pygame.Surface((int(hx - x0), int(th)), pygame.SRCALPHA)
+                # the desktop cloth (15, 70, 35) is much darker than the web
+                # one, so a 10 % wash disappears into it; this lands at roughly
+                # (48, 112, 76) — a quadrant you can see at a glance
+                shade.fill((120, 200, 160, 72))
+                self.screen.blit(shade, (x0, y0))
+            pygame.draw.line(self.screen,
+                             (160, 220, 190) if placing else (90, 130, 105),
+                             (hx, y0), (hx, y0 + th), 2 if placing else 1)
         # pockets
         for px, py in w.pockets:
             sx, sy = self.w2s(px, py)
@@ -450,7 +470,10 @@ class App:
         if self.phase == "over":
             msg = g.message
         elif self.await_place and self._human_turn():
-            msg = "Ball in hand — click inside the table to place the cue ball."
+            if getattr(g, "ball_in_hand_kitchen", False):
+                msg = "Break — place the cue ball behind the head string."
+            else:
+                msg = "Ball in hand — click anywhere on the table to place the cue ball."
         elif self.pending_bot:
             msg = "Bot is taking its shot…"
         elif self.simulating:

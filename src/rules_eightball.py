@@ -68,7 +68,7 @@ class EightBallGame:
                 w.add_ball(b)
                 idx += 1
         # cue ball
-        cue = Ball(w.width * 0.25, w.height / 2.0, r, number=0, kind="cue")
+        cue = Ball(w.width * 0.22, w.height / 2.0, r, number=0, kind="cue")
         w.add_ball(cue)
 
     # -- queries -----------------------------------------------------------
@@ -110,13 +110,36 @@ class EightBallGame:
                 if b.number in nums and not b.pocketed]
 
     # -- actions -----------------------------------------------------------
+    def head_string(self) -> float:
+        """x of the head string: the break is played from the quarter behind it."""
+        return self.world.width * 0.25
+
+    def place_refusal(self, x: float, y: float):
+        """Why a placement would be refused, for the UI. None when it is legal."""
+        if not self.ball_in_hand:
+            return None
+        w = self.world
+        r = w.ball_radius
+        if not (r <= x <= w.width - r and r <= y <= w.height - r):
+            return "That spot is off the table."
+        if self.ball_in_hand_kitchen and x > self.head_string():
+            return "Break: the cue ball must go behind the head string (the shaded quarter)."
+        for b in w.balls:
+            if b.kind == "cue" or b.pocketed:
+                continue
+            if math.hypot(b.x - x, b.y - y) < 2 * r:
+                return "There is a ball in the way — pick a clear spot."
+        return None
+
     def place_cue(self, x: float, y: float) -> bool:
         """Ball-in-hand placement. Returns True if accepted."""
         if not self.ball_in_hand:
             return False
         w = self.world
         r = w.ball_radius
-        if self.ball_in_hand_kitchen and x > w.width / 2.0:
+        # the break is played out of the kitchen; the centre of the cue ball may
+        # sit on the head string but never past it
+        if self.ball_in_hand_kitchen and x > self.head_string():
             return False
         # must be inside the table
         if not (r <= x <= w.width - r and r <= y <= w.height - r):
@@ -159,7 +182,8 @@ class EightBallGame:
     def auto_place_cue(self) -> None:
         """Default cue placement for the bot (head spot, nudged if blocked)."""
         w = self.world
-        self.place_cue(w.width * 0.25, w.height / 2.0)
+        # comfortably inside the kitchen, never on the line itself
+        self.place_cue(w.width * 0.22, w.height / 2.0)
 
     # -- evaluation --------------------------------------------------------
     def _evaluate(self) -> dict:
@@ -187,6 +211,10 @@ class EightBallGame:
             if not pocketed and balls_to_rail < 4:
                 fouls.append("CUSHION_HIT_MIN_ON_BREAK")
             self.ball_in_hand_kitchen = False
+        elif first is not None and not pocketed and not w.rail_after_contact:
+            # a legal stroke either pots a ball or drives one to a cushion after
+            # contact; too soft for either hands the table over
+            fouls.append("NO_CUSHION_AFTER_CONTACT")
 
         # premature 8-ball = loss
         if eight_sunk and not self.cleared_group(player):
@@ -264,12 +292,12 @@ class EightBallGame:
             cue = Ball(0, 0, r, number=0, kind="cue")
             w.add_ball(cue)
         # place at head spot, nudged if occupied
-        x, y = w.width * 0.25, w.height / 2.0
+        x, y = w.width * 0.22, w.height / 2.0
         while any(b is not cue and not b.pocketed and
                   math.hypot(b.x - x, b.y - y) < 2 * r for b in w.balls):
             x += r
             if x > w.width / 2.0:
-                x = w.width * 0.25
+                x = w.width * 0.22
                 y += r
         cue.x, cue.y = x, y
         cue.pocketed = False
