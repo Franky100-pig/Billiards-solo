@@ -12,6 +12,10 @@
  *   - Power: press anywhere to lock that direction, then drag BACK along the
  *     cue line and release. Only the backward component counts, so loading
  *     power can never change the aim (bloob's own input works this way).
+ *   - English: drag the spin dial, or step the tip with the arrow keys
+ *     (up/down = follow/draw, left/right = side; shift = fine step).
+ *     Double-click the dial or press S to re-centre. Every stroke resets the
+ *     tip to dead centre on its own, so english never carries over.
  *   - R / Esc: return to the menu.
  */
 
@@ -34,7 +38,12 @@ const SINK_TIME = 0.42;
 
 // Spin dial: the tip contact point on the cue ball. Screen offsets in units of
 // the ball radius; +x = right english, +y = top spin.
-const DIAL_DEFAULT = [0.0, 0.45];
+// Dead centre is a stun; the dial returns here after every stroke.
+const SPIN_CENTER = [0.0, 0.0];
+// One arrow-key press moves the tip this far (fraction of the ball radius).
+// Hold shift for a fine nudge, which is what you want near the centre.
+const SPIN_STEP = 0.2;
+const SPIN_STEP_FINE = 0.05;
 
 // 8-ball colours (number -> rgb); 9-15 reuse 1-7 as stripes
 const EIGHT_COLORS = {
@@ -122,7 +131,7 @@ class App {
     this.strike_angle = 0.0;
     this.strike_power = 0.0;
     // english (加塞): tip offset on the cue ball, [right, top]
-    this.spin = DIAL_DEFAULT.slice();
+    this.spin = SPIN_CENTER.slice();
     this.spin_drag = false;
     // presentation: contact sparks and pocket drops
     this.fx = [];
@@ -182,7 +191,7 @@ class App {
     this.overBtn = null;
     this.strike_t = 0.0;
     this.strike_from = null;
-    this.spin = DIAL_DEFAULT.slice();
+    this.spin = SPIN_CENTER.slice();
     this.spin_drag = false;
     this.fx = [];
     this.pocket_flash = [];
@@ -223,7 +232,7 @@ class App {
     this.canvas.addEventListener("dblclick", (e) => {
       const pos = getPos(this.canvas, e);
       if (this.phase === "play" && this._inDial(pos)) {
-        this.spin = DIAL_DEFAULT.slice();
+        this.spin = SPIN_CENTER.slice();
       }
     });
     window.addEventListener("keydown", (e) => {
@@ -234,10 +243,25 @@ class App {
         this.pending_bot = false;
         this.bot_search = null;
         this.spin_drag = false;
-      } else if (e.key === "s" || e.key === "S") {
-        // re-centre the english dial (no draw, no follow, no side)
-        this.spin = DIAL_DEFAULT.slice();
+        return;
       }
+      if (e.key === "s" || e.key === "S") {
+        // re-centre the english dial (no draw, no follow, no side)
+        this.spin = SPIN_CENTER.slice();
+        return;
+      }
+      // Arrow keys walk the tip around the cue ball: up/down = follow/draw,
+      // left/right = side spin. Holding a key auto-repeats, so the tip keeps
+      // travelling; shift gives a fine step for small adjustments.
+      const arrows = {
+        ArrowUp: [0, 1], ArrowDown: [0, -1],
+        ArrowLeft: [-1, 0], ArrowRight: [1, 0],
+      };
+      const d = arrows[e.key];
+      if (d === undefined) return;
+      e.preventDefault();          // otherwise the page scrolls
+      if (this.phase !== "play" || !this._humanTurn() || this.simulating) return;
+      this._nudgeSpin(d[0], d[1], e.shiftKey);
     });
   }
 
@@ -258,6 +282,24 @@ class App {
     let sy = -(pos[1] - cy) / (R * 0.80);
     const m = Math.hypot(sx, sy);
     if (m > 1.0) { sx /= m; sy /= m; }
+    this.spin = [sx, sy];
+  }
+
+  /**
+   * Move the tip by one step on a given axis (arrow keys). The tip cannot
+   * leave the ball, so the offset is clamped to the unit disc: an overshoot
+   * is projected back onto the rim instead of being dropped, which is why
+   * holding "up" parks the tip at 12 o'clock rather than flickering.
+   */
+  _nudgeSpin(dx, dy, fine = false) {
+    const step = fine ? SPIN_STEP_FINE : SPIN_STEP;
+    let sx = this.spin[0] + dx * step;
+    let sy = this.spin[1] + dy * step;
+    const m = Math.hypot(sx, sy);
+    if (m > 1.0) { sx /= m; sy /= m; }
+    // snap the last hair to exact zero / exact rim so the dot sits cleanly
+    if (Math.abs(sx) < 1e-9) sx = 0;
+    if (Math.abs(sy) < 1e-9) sy = 0;
     this.spin = [sx, sy];
   }
 
@@ -354,6 +396,11 @@ class App {
     this.strike_spin = spin ? [spin[0], spin[1]] : [0.0, 0.0];
     this.strike_t = 1.0;
     this.game.launch(angle, power, spin);
+    // Every stroke consumes its english: the next shot starts from dead centre,
+    // so a draw you dialled in for one shot can never leak into the next. The
+    // strike animation keeps its own copy in strike_spin, so the cue is still
+    // drawn off-centre while the ball is travelling.
+    this.spin = SPIN_CENTER.slice();
     this.simulating = true;
     this.pending_bot = false;
     this.bot_aim = null;
@@ -1368,8 +1415,9 @@ class App {
 
   /**
    * The english dial: a plan-view cue ball. Click (or drag) on it to place the
-   * tip; the dot is the contact point, so up = follow, down = draw, left/right
-   * = side spin. Double-click re-centres to the default (a touch above centre).
+   * tip, or walk the tip with the arrow keys; up = follow, down = draw,
+   * left/right = side spin. Double-click or S re-centres, and every stroke
+   * returns here on its own.
    */
   _renderDial() {
     const ctx = this.ctx;
@@ -1458,8 +1506,8 @@ class App {
     this._text(msg, 20, 54, 14.5, "#c2c8d3", "left", 400);
 
     if (this.phase === "play" && this._humanTurn() && !this.await_place && !this.simulating) {
-      this._text("aim with the mouse  ·  press, then drag back to load the cue  ·  "
-        + "english: click the spin dial (double-click re-centres)",
+      this._text("aim with the mouse  ·  press, then drag back to load  ·  "
+        + "english: arrow keys or drag the dial, S centres",
         20, WIN_H - 16, 12, "#8b929e", "left", 400);
     }
     this._text("R / Esc: menu", WIN_W - 18, WIN_H - 16, 12, "#8b929e", "right", 400);
