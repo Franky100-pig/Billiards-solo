@@ -11,9 +11,9 @@
  */
 
 const DIFFICULTY = {
-  easy:   { noise: 0.030, top_k: 3,  power_jitter: 0.20 },
-  medium: { noise: 0.012, top_k: 8,  power_jitter: 0.10 },
-  hard:   { noise: 0.0,   top_k: 99, power_jitter: 0.04 },
+  easy:   { noise: 0.030, top_k: 3,  sims: 8,  power_jitter: 0.20 },
+  medium: { noise: 0.012, top_k: 8,  sims: 14, power_jitter: 0.10 },
+  hard:   { noise: 0.0,   top_k: 99, sims: 20, power_jitter: 0.04 },
 };
 
 // how much "good next position" is worth, relative to potting a ball
@@ -193,55 +193,79 @@ function positionBonus(game, wc, cueAfter, potted, r) {
 }
 
 // --- core search ---------------------------------------------------------
-function enumeratePots(world, cue, targets, pockets, r, posFn) {
-  const cands = [];
+/**
+ * Geometry pass: every (target, pocket) pair that is physically clear, with
+ * the numbers the stroke will need. Doing all of this before any simulation
+ * lets us simulate only the most promising handful — the search used to
+ * simulate every candidate, which cost seconds per shot.
+ */
+function collectPots(world, cue, targets, pockets, r) {
+  const out = [];
   for (const t of targets) {
     for (const p of pockets) {
       const g = ghostAim(cue, t, p, r);
       if (g === null) continue;
       const angle = g[0], ghost = g[1];
-      const cue_clear = pathClear(world, [cue.x, cue.y], ghost, [cue.number, t.number], r);
-      const tgt_clear = pathClear(world, [t.x, t.y], p, [cue.number, t.number], r);
-      if (!(cue_clear && tgt_clear)) continue; // only attempt clear pots
-      const wc = world.clone();
-      wc.beginShot();
-      const cc = wc.cueBall();
-      // how square is the hit? the cue has to arrive along the line of centres
+      if (!pathClear(world, [cue.x, cue.y], ghost, [cue.number, t.number], r)) continue;
+      if (!pathClear(world, [t.x, t.y], p, [cue.number, t.number], r)) continue;
       const ux = Math.cos(angle), uy = Math.sin(angle);
       const ndx = t.x - ghost[0], ndy = t.y - ghost[1];
       const nd = Math.hypot(ndx, ndy) || 1.0;
       const cutCos = (ux * ndx + uy * ndy) / nd;
+      if (cutCos < 0.12) continue;                 // thinner than this is a fluke
       const d1 = Math.hypot(ghost[0] - cue.x, ghost[1] - cue.y);
       const d2 = Math.hypot(p[0] - t.x, p[1] - t.y);
-      const power = powerForPot(d1, d2, cutCos);
-      wc.shoot(cc, angle, power);
-      wc.simulate(1.0 / 300.0, 4500);
-
-      const cue_sunk = wc.pocketed_this_shot.includes(0);
-      let cue_after = null, pos = 0.0;
-      const cb = wc.cueBall();
-      if (!cue_sunk && cb && !cb.pocketed) {
-        cue_after = [cb.x, cb.y];
-        if (posFn) pos = posFn(wc, cb, wc.pocketed_this_shot);
-      }
-      cands.push({
-        target: t.number, pocket: p, angle,
-        cue_clear, tgt_clear,
-        pocketed: wc.pocketed_this_shot.slice(),
-        first: wc.first_contact,
-        cue_sunk, ghost, cue_after, pos,
-        power, cut: cutCos,
+      out.push({
+        target: t, pocket: p, angle, ghost, cutCos, d1, d2,
+        power: powerForPot(d1, d2, cutCos),
+        rank: cutCos - (d1 + d2) / 1500.0,
       });
     }
   }
-  return cands;
+  out.sort((a, b) => b.rank - a.rank);
+  return out;
+}
+
+/**
+ * Simulate the best candidates. A generator so the UI can spread the work over
+ * frames ("bot is thinking") instead of blocking the animation loop for a
+ * second; `chooseShot` below drains it synchronously for tests.
+ */
+function* enumeratePots(world, cue, targets, pockets, r, posFn, limit) {
+  const geo = collectPots(world, cue, targets, pockets, r);
+  const n = Math.min(geo.length, Math.max(1, limit | 0));
+  for (let i = 0; i < n; i++) {
+    const c = geo[i];
+    const t = c.target, p = c.pocket;
+    const wc = world.clone();
+    wc.beginShot();
+    const cc = wc.cueBall();
+    wc.shoot(cc, c.angle, c.power);
+    wc.simulate(1.0 / 180.0, 4000);
+
+    const cue_sunk = wc.pocketed_this_shot.includes(0);
+    let cue_after = null, pos = 0.0;
+    const cb = wc.cueBall();
+    if (!cue_sunk && cb && !cb.pocketed) {
+      cue_after = [cb.x, cb.y];
+      if (posFn) pos = posFn(wc, cb, wc.pocketed_this_shot);
+    }
+    yield {
+      target: t.number, pocket: p, angle: c.angle,
+      cue_clear: true, tgt_clear: true,
+      pocketed: wc.pocketed_this_shot.slice(),
+      first: wc.first_contact,
+      cue_sunk, ghost: c.ghost, cue_after, pos,
+      power: c.power, cut: c.cutCos,
+    };
+  }
 }
 
 /**
  * One-rail escape search: aim at the cushion so the cue ball banks into a
  * legal ball. Used when the direct pot line is blocked (snookered).
  */
-function escapeShots(game, world, cue, targets, r, posFn) {
+function* escapeShots(game, world, cue, targets, r, posFn) {
   const pockets = world.pockets;
   const pool = targets
     .map(t => [Math.hypot(t.x - cue.x, t.y - cue.y), t])
@@ -249,7 +273,6 @@ function escapeShots(game, world, cue, targets, r, posFn) {
     .slice(0, 4)
     .map(x => x[1]);
 
-  const out = [];
   for (const t of pool) {
     for (const seg of world.cushions) {
       const m = reflectPoint(t.x, t.y, seg[0], seg[1], seg[2], seg[3]);
@@ -271,7 +294,7 @@ function escapeShots(game, world, cue, targets, r, posFn) {
       const wc = world.clone();
       wc.beginShot();
       wc.shoot(wc.cueBall(), angle, power);
-      wc.simulate(1.0 / 300.0, 4500);
+      wc.simulate(1.0 / 180.0, 4000);
 
       const cue_sunk = wc.pocketed_this_shot.includes(0);
       let pos = 0.0;
@@ -283,10 +306,9 @@ function escapeShots(game, world, cue, targets, r, posFn) {
       else if (wc.first_contact === null) sc -= 60.0;
       else if (!targets.some(x => x.number === wc.first_contact)) sc -= 120.0;
       else { sc += 30.0; sc += pos * 0.5; }
-      out.push({ score: sc, angle, power });
+      yield { score: sc, angle, power };
     }
   }
-  return out;
 }
 
 // --- per-mode scoring ----------------------------------------------------
@@ -341,7 +363,13 @@ function isBreakShot(game) {
   return game.reds_remaining >= 15;
 }
 
-function chooseShot(game, difficulty = "medium") {
+/**
+ * Pick a stroke. A generator: every simulated candidate yields, so the UI can
+ * spend a few milliseconds per frame on the search (the bot visibly "thinks")
+ * instead of freezing the animation loop. `chooseShot` below drains it for
+ * headless use.
+ */
+function* shotSearch(game, difficulty = "medium") {
   const cfg = DIFFICULTY[difficulty] || DIFFICULTY.medium;
   const world = game.world;
   const cue = game.cue();
@@ -352,8 +380,15 @@ function chooseShot(game, difficulty = "medium") {
 
   // 0) break: fire into the apex of the pack at a real break speed
   if (isBreakShot(game) && targets.length > 0) {
+    // The apex is the ball nearest the cue — not the one deepest in the pack
+    // (aiming at the back row walks the cue ball through the rack and into a
+    // pocket, which is exactly what a break must never do).
     let apex = targets[0];
-    for (const t of targets) if (t.x > apex.x) apex = t;
+    let best = Math.hypot(apex.x - cue.x, apex.y - cue.y);
+    for (const t of targets) {
+      const d = Math.hypot(t.x - cue.x, t.y - cue.y);
+      if (d < best) { best = d; apex = t; }
+    }
     let angle = Math.atan2(apex.y - cue.y, apex.x - cue.x);
     angle += randGauss(0, cfg.noise * 0.5);
     const base = game.game_type === "8ball" ? BREAK_8BALL : BREAK_SNOOKER;
@@ -362,16 +397,15 @@ function chooseShot(game, difficulty = "medium") {
   }
 
   const posFn = (wc, cueAfter, potted) => positionBonus(game, wc, cueAfter, potted, r);
-
-  const cands = enumeratePots(world, cue, targets, pockets, r, posFn);
   const scorer = game.game_type === "8ball" ? score8ball : scoreSnooker;
 
   const scored = [];
-  for (const c of cands) {
+  for (const c of enumeratePots(world, cue, targets, pockets, r, posFn, cfg.sims)) {
     let s = scorer(game, c) + c.pos;
     const on_nums = new Set(targets.map(b => b.number));
     if (c.first !== null && !on_nums.has(c.first)) s -= 150.0;
     scored.push([s, c]);
+    yield;
   }
   scored.sort((a, b) => b[0] - a[0]);
 
@@ -393,7 +427,11 @@ function chooseShot(game, difficulty = "medium") {
 
   // 2) nothing worth potting -> try a one-rail escape before a plain safety
   if (targets.length > 0) {
-    const escapes = escapeShots(game, world, cue, targets, r, posFn);
+    const escapes = [];
+    for (const e of escapeShots(game, world, cue, targets, r, posFn)) {
+      escapes.push(e);
+      yield;
+    }
     if (escapes.length > 0) {
       escapes.sort((a, b) => b.score - a.score);
       const best = escapes[0];
@@ -404,6 +442,14 @@ function chooseShot(game, difficulty = "medium") {
   }
 
   return safetyShot(game, cue, targets, r, cfg, world);
+}
+
+/** Synchronous wrapper (tests, bot-vs-bot, headless play). */
+function chooseShot(game, difficulty = "medium") {
+  const it = shotSearch(game, difficulty);
+  let r = it.next();
+  while (!r.done) r = it.next();
+  return r.value;
 }
 
 function targetXY(game, number) {
@@ -436,9 +482,9 @@ function safetyShot(game, cue, targets, r, cfg, world) {
 
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
-    DIFFICULTY, POSITION, chooseShot, enumeratePots, escapeShots,
-    score8ball, scoreSnooker, safetyShot, positionQuality, positionBonus,
-    nextTargets, botSeed, rand01, randGauss,
+    DIFFICULTY, POSITION, chooseShot, shotSearch, collectPots,
+    enumeratePots, escapeShots, score8ball, scoreSnooker, safetyShot,
+    positionQuality, positionBonus, nextTargets, botSeed, rand01, randGauss,
     powerForPot, powerForDistance, isBreakShot,
     POWER_MIN, POWER_MAX, BREAK_8BALL, BREAK_SNOOKER,
   };
