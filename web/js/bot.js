@@ -97,6 +97,42 @@ function powerForDistance(dist) {
   return powerForPot(dist, 0.0, 1.0);
 }
 
+/**
+ * A stroke that touches a ball and then leaves everything short is a foul under
+ * the standard "no cushion after contact" rule — the ball must be potted or
+ * driven to a rail. Cheap to test: the world records both facts.
+ */
+function isSoftFoul(wc) {
+  return wc.first_contact !== null
+    && wc.pocketed_this_shot.length === 0
+    && !wc.rail_after_contact;
+}
+
+/**
+ * Fire the same line with more pace until the shot is legal. The bot must never
+ * hand the table over by tapping the cue ball, so instead of scoring a soft
+ * stroke badly, it simply refuses to play one: power goes up by 45% at a time
+ * until something reaches a cushion or drops. Three tries is enough in practice;
+ * if the line is hopeless the caller still gets the strongest version.
+ */
+function legalise(world, angle, power) {
+  const sim = (pw) => {
+    const wc = world.clone();
+    wc.beginShot();
+    wc.shoot(wc.cueBall(), angle, pw);
+    wc.simulate(1.0 / 180.0, 4000);
+    return wc;
+  };
+  let wc = sim(power);
+  const start = power;
+  for (let i = 0; i < 3 && isSoftFoul(wc); i++) {
+    power = Math.min(POWER_MAX, power * 1.45);
+    if (power === start) break;
+    wc = sim(power);
+  }
+  return { wc, power, foul: isSoftFoul(wc) };
+}
+
 /** Mirror point p across the line a->b (used for one-rail bank shots). */
 function reflectPoint(px, py, ax, ay, bx, by) {
   const abx = bx - ax, aby = by - ay;
@@ -237,11 +273,7 @@ function* enumeratePots(world, cue, targets, pockets, r, posFn, limit) {
   for (let i = 0; i < n; i++) {
     const c = geo[i];
     const t = c.target, p = c.pocket;
-    const wc = world.clone();
-    wc.beginShot();
-    const cc = wc.cueBall();
-    wc.shoot(cc, c.angle, c.power);
-    wc.simulate(1.0 / 180.0, 4000);
+    const { wc, power, foul } = legalise(world, c.angle, c.power);
 
     const cue_sunk = wc.pocketed_this_shot.includes(0);
     let cue_after = null, pos = 0.0;
@@ -255,8 +287,8 @@ function* enumeratePots(world, cue, targets, pockets, r, posFn, limit) {
       cue_clear: true, tgt_clear: true,
       pocketed: wc.pocketed_this_shot.slice(),
       first: wc.first_contact,
-      cue_sunk, ghost: c.ghost, cue_after, pos,
-      power: c.power, cut: c.cutCos,
+      cue_sunk, ghost: c.ghost, cue_after, pos, foul,
+      power, bumped: power > c.power + 1e-9, cut: c.cutCos,
     };
   }
 }
@@ -290,11 +322,8 @@ function* escapeShots(game, world, cue, targets, r, posFn) {
       const angle = Math.atan2(aim[1] - cue.y, aim[0] - cue.x);
       const path = d1 + Math.hypot(t.x - I[0], t.y - I[1]);
       // the cushion eats 25% of the speed, so ask for slightly more
-      const power = Math.min(POWER_MAX, powerForPot(path / 0.75, 0.0, 1.0));
-      const wc = world.clone();
-      wc.beginShot();
-      wc.shoot(wc.cueBall(), angle, power);
-      wc.simulate(1.0 / 180.0, 4000);
+      const want = Math.min(POWER_MAX, powerForPot(path / 0.75, 0.0, 1.0));
+      const { wc, power } = legalise(world, angle, want);
 
       const cue_sunk = wc.pocketed_this_shot.includes(0);
       let pos = 0.0;
@@ -305,7 +334,10 @@ function* escapeShots(game, world, cue, targets, r, posFn) {
       if (cue_sunk) sc -= 300.0;
       else if (wc.first_contact === null) sc -= 60.0;
       else if (!targets.some(x => x.number === wc.first_contact)) sc -= 120.0;
-      else { sc += 30.0; sc += pos * 0.5; }
+      else {
+        sc += 30.0; sc += pos * 0.5;
+        if (isSoftFoul(wc)) sc -= 80.0;
+      }
       yield { score: sc, angle, power };
     }
   }
@@ -404,6 +436,7 @@ function* shotSearch(game, difficulty = "medium") {
     let s = scorer(game, c) + c.pos;
     const on_nums = new Set(targets.map(b => b.number));
     if (c.first !== null && !on_nums.has(c.first)) s -= 150.0;
+    if (c.foul) s -= 120.0;
     scored.push([s, c]);
     yield;
   }
@@ -421,7 +454,10 @@ function* shotSearch(game, difficulty = "medium") {
     const angle = c.angle + randGauss(0, cfg.noise);
     // reuse the exact stroke the candidate was simulated with, so the bot's
     // read of its own shot stays honest; jitter models a human's touch
-    const pw = c.power * (1.0 + randGauss(0, cfg.power_jitter));
+    // jitter models a human's touch, but a stroke that was given extra pace to
+    // become legal must never jitter back below that threshold
+    const jittered = c.power * (1.0 + randGauss(0, cfg.power_jitter));
+    const pw = c.bumped ? Math.max(c.power, jittered) : jittered;
     return [angle, Math.min(POWER_MAX, Math.max(POWER_MIN, pw))];
   }
 
@@ -477,7 +513,10 @@ function safetyShot(game, cue, targets, r, cfg, world) {
   // a safety is a touch shot: enough to reach the ball and push it to a rail
   const base = Math.min(POWER_MAX, FRICTION_K * best[1] * 1.25 + 45.0);
   const pw = base * (1.0 + randGauss(0, cfg.power_jitter));
-  return [angle, Math.max(POWER_MIN, pw)];
+  // A safety still has to be legal: if the touch dies before reaching a rail,
+  // push it until one does.
+  const fixed = legalise(w, angle, Math.max(POWER_MIN, pw));
+  return [angle, fixed.power];
 }
 
 if (typeof module !== "undefined" && module.exports) {

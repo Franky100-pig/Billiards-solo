@@ -105,6 +105,44 @@ def power_for_distance(dist: float) -> float:
     return power_for_pot(dist, 0.0, 1.0)
 
 
+def is_soft_foul(wc: World) -> bool:
+    """A stroke that touches a ball and then leaves everything short is a foul
+    under the standard "no cushion after contact" rule — something must be
+    potted or driven to a rail. The world records both facts, so this is cheap.
+    """
+    return (wc.first_contact is not None
+            and not wc.pocketed_this_shot
+            and not wc.rail_after_contact)
+
+
+def legalise(world: World, angle: float, power: float):
+    """Fire the same line with more pace until the shot is legal.
+
+    The bot must never hand the table over by tapping the cue ball, so instead
+    of scoring a soft stroke badly it simply refuses to play one: power goes up
+    by 45% at a time until something reaches a cushion or drops. Three tries is
+    enough in practice; if the line is hopeless the caller still gets the
+    strongest version. Returns (world_after, power, foul).
+    """
+    def sim(pw: float) -> World:
+        wc = world.clone()
+        wc.begin_shot()
+        wc.shoot(wc.cue_ball(), angle, pw)
+        wc.simulate(h=1.0 / 300.0, max_steps=4500)
+        return wc
+
+    wc = sim(power)
+    start = power
+    for _ in range(3):
+        if not is_soft_foul(wc):
+            break
+        power = min(POWER_MAX, power * 1.45)
+        if power == start:
+            break
+        wc = sim(power)
+    return wc, power, is_soft_foul(wc)
+
+
 def reflect_point(px: float, py: float, ax: float, ay: float,
                   bx: float, by: float) -> Tuple[float, float]:
     """Mirror point p across the line a->b (used for one-rail bank shots)."""
@@ -226,9 +264,6 @@ def enumerate_pots(world: World, cue: Ball, targets: List[Ball],
             if not (cue_clear and tgt_clear):
                 continue  # only attempt geometrically clear pots
             # simulate (lighter settings; the bot only needs an approximate read)
-            wc = world.clone()
-            wc.begin_shot()
-            cc = wc.cue_ball()
             # how square is the hit? the cue must arrive along the line of centres
             ux, uy = math.cos(angle), math.sin(angle)
             ndx, ndy = t.x - ghost[0], t.y - ghost[1]
@@ -236,9 +271,8 @@ def enumerate_pots(world: World, cue: Ball, targets: List[Ball],
             cut_cos = (ux * ndx + uy * ndy) / nd
             d1 = math.hypot(ghost[0] - cue.x, ghost[1] - cue.y)
             d2 = math.hypot(p[0] - t.x, p[1] - t.y)
-            power = power_for_pot(d1, d2, cut_cos)
-            wc.shoot(cc, angle, power)
-            wc.simulate(h=1.0 / 300.0, max_steps=4500)
+            geom_power = power_for_pot(d1, d2, cut_cos)
+            wc, power, foul = legalise(world, angle, geom_power)
 
             cue_sunk = 0 in wc.pocketed_this_shot
             cue_after = None
@@ -255,7 +289,8 @@ def enumerate_pots(world: World, cue: Ball, targets: List[Ball],
                 "first": wc.first_contact,
                 "cue_sunk": cue_sunk,
                 "ghost": ghost, "cue_after": cue_after, "pos": pos,
-                "power": power, "cut": cut_cos,
+                "power": power, "foul": foul,
+                "bumped": power > geom_power + 1e-9, "cut": cut_cos,
             })
     return cands
 
@@ -287,11 +322,8 @@ def escape_shots(game, world: World, cue: Ball, targets: List[Ball],
             angle = math.atan2(aim[1] - cue.y, aim[0] - cue.x)
             path = d1 + math.hypot(t.x - I[0], t.y - I[1])
             # the cushion eats 25% of the speed, so ask for slightly more
-            power = min(POWER_MAX, power_for_pot(path / 0.75, 0.0, 1.0))
-            wc = world.clone()
-            wc.begin_shot()
-            wc.shoot(wc.cue_ball(), angle, power)
-            wc.simulate(h=1.0 / 300.0, max_steps=4500)
+            want = min(POWER_MAX, power_for_pot(path / 0.75, 0.0, 1.0))
+            wc, power, _foul = legalise(world, angle, want)
 
             cue_sunk = 0 in wc.pocketed_this_shot
             pos = 0.0
@@ -307,6 +339,8 @@ def escape_shots(game, world: World, cue: Ball, targets: List[Ball],
                 sc = -120.0
             else:
                 sc = 30.0 + pos * 0.5
+                if is_soft_foul(wc):
+                    sc -= 80.0
             out.append({"score": sc, "angle": angle, "power": power})
     return out
 
@@ -388,7 +422,10 @@ def choose_shot(game, difficulty: str = "medium") -> Tuple[float, float]:
 
     # 0) break: fire into the apex of the pack at a real break speed
     if is_break_shot(game) and targets:
-        apex = max(targets, key=lambda t: t.x)
+        # The apex is the ball nearest the cue — not the one deepest in the pack
+        # (aiming at the back row walks the cue ball through the rack and into a
+        # pocket, which is exactly what a break must never do).
+        apex = min(targets, key=lambda t: math.hypot(t.x - cue.x, t.y - cue.y))
         angle = math.atan2(apex.y - cue.y, apex.x - cue.x)
         angle += random.gauss(0, cfg["noise"] * 0.5)
         base = BREAK_8BALL if game.__class__.__name__ == "EightBallGame" \
@@ -412,6 +449,9 @@ def choose_shot(game, difficulty: str = "medium") -> Tuple[float, float]:
         on_nums = {b.number for b in targets}
         if c["first"] not in on_nums and c["first"] is not None:
             s -= 150.0
+        # a stroke that leaves everything short hands the table over
+        if c["foul"]:
+            s -= 120.0
         scored.append((s, c))
     scored.sort(key=lambda x: x[0], reverse=True)
 
@@ -425,8 +465,11 @@ def choose_shot(game, difficulty: str = "medium") -> Tuple[float, float]:
             s, c = pool[0]
         angle = c["angle"] + random.gauss(0, cfg["noise"])
         # reuse the exact stroke the candidate was simulated with, so the bot's
-        # read of its own shot stays honest; jitter models a human's touch
-        pw = c["power"] * (1.0 + random.gauss(0, cfg["power_jitter"]))
+        # read of its own shot stays honest; jitter models a human's touch, but
+        # a stroke given extra pace to become legal must never jitter back below
+        # that threshold
+        jittered = c["power"] * (1.0 + random.gauss(0, cfg["power_jitter"]))
+        pw = max(c["power"], jittered) if c["bumped"] else jittered
         return angle, min(POWER_MAX, max(POWER_MIN, pw))
 
     # 2) nothing worth potting -> try a one-rail escape before a plain safety
@@ -468,4 +511,7 @@ def safety_shot(game, cue: Ball, targets: List[Ball], r: float,
     angle += random.gauss(0, cfg["noise"] * 1.5)
     pw = min(POWER_MAX, FRICTION_K * best_d * 1.25 + 45.0) \
         * (1.0 + random.gauss(0, cfg["power_jitter"]))
-    return angle, max(POWER_MIN, pw)
+    # A safety still has to be legal: if the touch dies before reaching a rail,
+    # push it until one does.
+    _wc, fixed, _foul = legalise(w, angle, max(POWER_MIN, pw))
+    return angle, fixed
