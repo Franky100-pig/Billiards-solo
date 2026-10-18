@@ -31,15 +31,20 @@ No install, no local server, no network:
 
 ### Controls
 - **Ball-in-hand** — click/tap inside the allowed area to place the cue ball.
-- **Aim & shoot** — press & hold, drag **away** from the cue (slingshot), release. Pull distance = power;
-  the shot travels opposite the drag.
+- **Aim** — just move the cursor. The aim is the ray **from the cue ball to the pointer**, so the line,
+  the ghost ball and the cue all point where you are looking. (Clicking is not what aims.)
+- **Power** — press anywhere to **lock** that direction, then drag **back** along the cue and release. The
+  shot only ever uses the backward component of the drag, so loading power cannot change where you are
+  pointing; a sideways or forward drag loads nothing. **Right-click** puts a loaded cue back down.
 - **English (加塞)** — click inside the spin dial on the right to move the strike point. Drag the dot to the
   bottom and the shot is a **draw**, to the top a **follow**, left/right gives **side spin**. Double-click the
   dial (or press **S**) to re-centre it. The cue itself is drawn off-centre, matching the strike point.
 - **R / Esc** — back to the menu.
 
-The drag is gamma-shaped (`power = min + frac^1.35 · range`), so the first third of the pull is a soft touch
-and only the last stretch reaches a full stroke. A live `POWER n%` bar makes it easy to judge.
+This is how bloob's own input works: its `power(start, end, angle)` helper throws the pull away unless it is
+within 90° of the cue, which is exactly why aiming and loading are two separate gestures there. The pull is
+gamma-shaped (`power = min + frac^1.35 · range`), so the first third of the drag is a soft touch and only the
+last stretch reaches a full stroke. A live `POWER n%` bar makes it easy to judge.
 
 ### Pacing
 
@@ -207,9 +212,12 @@ The JavaScript port surfaced three genuine bugs that also affected the Python bu
   coasting ball's speed follows `v₀·e^(−0.45 t)` to within a few per cent.
 - **Position play & escapes (Node, headless): 6/6** — a deliberately snookered cue finds a one-rail kick that
   contacts the ball on, stays on the table, and the 8-ball / snooker frames still finish.
-- **UI wiring (headless DOM/Canvas): 32/32** — menu → start → place → aim → pull → strike → resolve → bot
+- **UI wiring (headless DOM/Canvas): 41/41** — menu → start → place → aim → pull → strike → resolve → bot
   turn, for both modes, plus the game-over overlay, a monotonic power curve from a soft tap to a full stroke,
-  the spin dial setting the strike point, and ball-in-hand on both tables.
+  the spin dial setting the strike point, and ball-in-hand on both tables. The aim/power split has its own
+  cases: pointing right aims right (not left), pointing up aims up, jitter sitting on the ball is ignored,
+  pressing does not move the aim, the aim is identical before and after a full pull, and sideways/forward
+  drags load exactly zero power.
 - Screenshots above are real renders captured with headless Chrome.
 
 The bot search is a **generator** that is drained in ~7 ms slices per frame, so choosing a shot never freezes
@@ -256,8 +264,12 @@ bot 除 ghost-ball 进球搜索外，新增**走位评估**（打完球后母球
 
 **力度**：bot 不再"每杆最大力"。指数摩擦下球滑行距离恰为 `v₀/k`，于是所需速度可由几何直接算出
 `power = k·(母球到假想球距离 + 目标球到袋距离 / cos(切角))`，薄球按法向分量补偿。实测一整局 8 球
-力度落在 ~130–1000（上限 1350），只有开球是刻意发力。玩家侧拖拽用 gamma 曲线，前 1/3 是轻推，
-后段才到满杆，并实时显示 `POWER n%`。
+力度落在 ~130–1000（上限 1350），只有开球是刻意发力。
+
+**瞄准与发力分开**（和 bloob 一样）：鼠标移动就决定方向——瞄准线是**母球到鼠标的射线**，球杆、假想球、
+预测线全都指向你看着的地方；按下只是**锁定**这个方向，之后往回拖才拉杆蓄力。蓄力只取"沿球杆往回"的那
+一个分量，所以拉多大力都改不了方向，横着拖、往前拖都是 0，右键把拉满的杆放回去。gamma 曲线让前 1/3
+是轻推、后段才到满杆，并实时显示 `POWER n%`。
 
 **节奏**：台面现在按**真实时间**跑——固定 240 Hz 积分步长、每帧 4 个子步，也就是每帧恰好推进 1/60 秒
 的台面时间。旧版本每帧跑 16 个 1/360 秒的步，等于所有球**快 2.7 倍**，碰撞在看清之前就结束了，这就是
