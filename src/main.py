@@ -7,9 +7,11 @@ input, rendering, and turn flow. No network access anywhere.
 
 Controls:
   - Ball-in-hand: click inside the allowed area to place the cue ball.
-  - Aiming: press & hold the left mouse button, drag AWAY from the cue
-    (slingshot), release to shoot. Pull distance = power; direction is
-    opposite the drag (you pull back to aim forward).
+  - Aiming: just move the mouse. The aim is the ray from the cue ball TO the
+    cursor, so the cue line and the shot both point where the pointer is.
+  - Power: press the left button to lock that direction, then drag BACK along
+    the cue line and release. Only the backward component counts, so loading
+    power can never change the aim.
   - R: return to the menu (restart) after a frame ends.
 """
 
@@ -89,7 +91,10 @@ class App:
 
         # interaction
         self.mouse = (0, 0)
+        self.mouse_seen = False       # keep the default aim until the mouse moves
         self.pulling = False
+        self.pull_from = None         # where the power drag started
+        self.pull_len = 0.0           # px pulled back along the cue line
         self.simulating = False
         self.await_place = False
         self.pending_bot = False
@@ -141,6 +146,8 @@ class App:
         self.phase = "play"
         self.simulating = False
         self.pulling = False
+        self.pull_from = None
+        self.pull_len = 0.0
         self.pending_bot = False
         self.await_place = self.game.ball_in_hand
 
@@ -167,12 +174,42 @@ class App:
                 self.await_place = False
             return
         if not self.simulating and self._human_turn():
-            self.pulling = True
+            self.begin_pull(pos)
+
+    def aim_at(self, pos):
+        """Aim straight at the cursor: the ray runs from the cue ball TO the
+        mouse, so the line and the shot both point where you are looking.
+        (This used to be the opposite direction and only updated while
+        dragging, which made the aim feel inverted and impossible to set
+        before loading power.)"""
+        if self.phase != "play" or self.pulling or self.simulating:
+            return
+        if not self.mouse_seen or not self._human_turn():
+            return
+        cue = self.game.cue()
+        if cue is None:
+            return
+        cx, cy = self.w2s(cue.x, cue.y)
+        dx, dy = pos[0] - cx, pos[1] - cy
+        if math.hypot(dx, dy) < 6.0:
+            return
+        self.aim_angle = math.atan2(dy, dx)
+
+    def begin_pull(self, pos):
+        """Press locks the direction and starts loading the cue; the drag that
+        follows only ever changes the power."""
+        if self.game.cue() is None:
+            return
+        self.pulling = True
+        self.pull_from = (pos[0], pos[1])
+        self.pull_len = 0.0
+        self.power = 0.0
 
     def on_release(self, pos):
         if self.phase != "play" or not self.pulling:
             return
         self.pulling = False
+        self.pull_from = None
         if self.power < MIN_LAUNCH * 0.5:
             return
         cue = self.game.cue()
@@ -185,23 +222,25 @@ class App:
         return self.game.current == 0
 
     def update_pull(self):
-        if not self.pulling:
+        # aiming happens on hover, not on drag: the direction is settled first
+        self.aim_at(self.mouse)
+        if not self.pulling or self.pull_from is None:
             return
         cue = self.game.cue()
         if cue is None:
-            return
-        cx, cy = self.w2s(cue.x, cue.y)
-        dx = self.mouse[0] - cx
-        dy = self.mouse[1] - cy
-        dist = math.hypot(dx, dy)
-        if dist < 4:
             self.power = 0.0
             return
-        # slingshot: shoot opposite the drag
-        self.aim_angle = math.atan2(-dy, -dx)
-        self.power = min(MAX_LAUNCH, (min(dist, MAX_DRAG) / MAX_DRAG) * MAX_LAUNCH)
-        if self.power < MIN_LAUNCH:
-            self.power = MIN_LAUNCH
+        ux, uy = math.cos(self.aim_angle), math.sin(self.aim_angle)
+        dx = self.mouse[0] - self.pull_from[0]
+        dy = self.mouse[1] - self.pull_from[1]
+        # only the component dragged BACK along the cue counts, so sideways
+        # wobble changes neither aim nor strength and a forward drag never fires
+        self.pull_len = max(0.0, min(MAX_DRAG, -(dx * ux + dy * uy)))
+        if self.pull_len < 2.0:
+            self.power = 0.0
+            return
+        self.power = (MIN_LAUNCH
+                      + (self.pull_len / MAX_DRAG) ** 1.35 * (MAX_LAUNCH - MIN_LAUNCH))
 
     # -- turn flow ---------------------------------------------------------
     def after_resolve(self):
@@ -238,9 +277,16 @@ class App:
                     running = False
                 elif event.type == pygame.MOUSEMOTION:
                     self.mouse = event.pos
+                    self.mouse_seen = True
                 elif event.type == pygame.MOUSEBUTTONDOWN:
                     if event.button == 1:
                         self.on_click(event.pos)
+                    elif event.button == 3:
+                        # right click: put a loaded cue back down
+                        self.pulling = False
+                        self.pull_from = None
+                        self.pull_len = 0.0
+                        self.power = 0.0
                 elif event.type == pygame.MOUSEBUTTONUP:
                     if event.button == 1:
                         self.on_release(event.pos)
@@ -368,10 +414,11 @@ class App:
         ang = self.aim_angle
         end = (cx + math.cos(ang) * 320, cy + math.sin(ang) * 320)
         pygame.draw.line(self.screen, (255, 255, 255), (cx, cy), end, 2)
-        # pull indicator (backwards) while charging
-        if self.pulling and self.power > 0:
-            back = (cx - math.cos(ang) * (self.power / MAX_LAUNCH) * MAX_DRAG,
-                    cy - math.sin(ang) * (self.power / MAX_LAUNCH) * MAX_DRAG)
+        # pull indicator (backwards) while charging: it shows the actual drag
+        # distance along the cue, which is the only thing loading power
+        if self.pulling and self.pull_len > 0:
+            back = (cx - math.cos(ang) * self.pull_len,
+                    cy - math.sin(ang) * self.pull_len)
             pygame.draw.line(self.screen, (255, 120, 90), (cx, cy), back, 3)
             # power bar
             bw, bh = 200, 14

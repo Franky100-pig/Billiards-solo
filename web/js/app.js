@@ -7,8 +7,11 @@
  *
  * Controls:
  *   - Ball-in-hand: click/tap inside the allowed area to place the cue ball.
- *   - Aiming: press & hold, drag AWAY from the cue (slingshot), release to shoot.
- *     Pull distance = power; the shot goes opposite the drag direction.
+ *   - Aiming: move the cursor. The aim is the ray from the cue ball TO the
+ *     cursor, so the cue line and the shot both point at the mouse.
+ *   - Power: press anywhere to lock that direction, then drag BACK along the
+ *     cue line and release. Only the backward component counts, so loading
+ *     power can never change the aim (bloob's own input works this way).
  *   - R / Esc: return to the menu.
  */
 
@@ -99,7 +102,11 @@ class App {
     this.ox = 0.0; this.oy = 0.0;
 
     this.mouse = [0, 0];
+    this.mouse_seen = false;      // until the pointer moves, keep the default aim
+    this.pointer_touch = false;
     this.pulling = false;
+    this.pull_from = null;        // where the power drag started
+    this.pull_len = 0.0;          // px pulled back along the cue line
     this.simulating = false;
     this.await_place = false;
     this.pending_bot = false;
@@ -164,12 +171,14 @@ class App {
     this.phase = "play";
     this.simulating = false;
     this.pulling = false;
+    this.pull_from = null;
+    this.pull_len = 0.0;
     this.pending_bot = false;
     this.bot_think_frames = 0;
     this.bot_aim = null;
     this.bot_search = null;
     this.power = 0.0;
-    this.aim_angle = 0.0;
+    this.aim_angle = 0.0;         // the break aims straight up the table
     this.overBtn = null;
     this.strike_t = 0.0;
     this.strike_from = null;
@@ -184,15 +193,28 @@ class App {
   // -- input -------------------------------------------------------------
   _bindInput() {
     this.canvas.addEventListener("pointerdown", (e) => {
+      if (e.button === 2) {          // right click: put a loaded cue back down
+        e.preventDefault();
+        this.pulling = false;
+        this.pull_from = null;
+        this.pull_len = 0.0;
+        this.power = 0.0;
+        return;
+      }
       if (e.button !== undefined && e.button !== 0) return;
       e.preventDefault();
       const pos = getPos(this.canvas, e);
       this.mouse = pos;
+      this.mouse_seen = true;
+      this.pointer_touch = (e.pointerType === "touch");
       this.onClick(pos);
     });
     window.addEventListener("pointermove", (e) => {
       this.mouse = getPos(this.canvas, e);
-      if (this.spin_drag) this._setSpinFrom(this.mouse);
+      this.mouse_seen = true;
+      this.pointer_touch = (e.pointerType === "touch");
+      if (this.spin_drag) { this._setSpinFrom(this.mouse); return; }
+      this._aimAt(this.mouse);
     });
     window.addEventListener("pointerup", (e) => {
       if (this.spin_drag) { this.spin_drag = false; return; }
@@ -274,13 +296,50 @@ class App {
       }
       return;
     }
-    if (!this.simulating && this._humanTurn()) this.pulling = true;
+    if (!this.simulating && this._humanTurn()) this._beginPull(pos);
+  }
+
+  /**
+   * Aim straight at the cursor: the ray runs from the cue ball TO the mouse, so
+   * the line, the ghost ball and the cue all point where you are looking. (The
+   * old build aimed opposite the pointer and only while dragging, which is why
+   * the direction felt inverted and could not be set before loading power.)
+   */
+  _aimAt(pos) {
+    if (this.phase !== "play" || this.pulling || this.simulating) return;
+    if (!this.mouse_seen || !this._humanTurn()) return;
+    const cue = this.game.cue();
+    if (cue === null) return;
+    const [cx, cy] = this.w2s(cue.x, cue.y);
+    const dx = pos[0] - cx, dy = pos[1] - cy;
+    if (Math.hypot(dx, dy) < 6.0) return;   // ignore jitter sitting on the ball
+    this.aim_angle = Math.atan2(dy, dx);
+  }
+
+  /**
+   * Press locks the direction and starts loading the cue. Touch has no hover,
+   * so there the press point doubles as the aim (ball -> finger), which is the
+   * only way a finger can point at anything.
+   */
+  _beginPull(pos) {
+    const cue = this.game.cue();
+    if (cue === null) return;
+    if (this.pointer_touch) {
+      const [cx, cy] = this.w2s(cue.x, cue.y);
+      const dx = pos[0] - cx, dy = pos[1] - cy;
+      if (Math.hypot(dx, dy) > 6.0) this.aim_angle = Math.atan2(dy, dx);
+    }
+    this.pulling = true;
+    this.pull_from = [pos[0], pos[1]];
+    this.pull_len = 0.0;
+    this.power = 0.0;
   }
 
   onRelease(pos) {
     if (this.phase !== "play" || !this.pulling) return;
     this.pulling = false;
-    if (this.power < MIN_LAUNCH * 0.6) { this.power = 0.0; return; }
+    if (this.power < MIN_LAUNCH * 0.6) { this.power = 0.0; this.pull_from = null; return; }
+    this.pull_from = null;
     if (this.game.cue() === null) return;
     this._strike(this.aim_angle, this.power, this.spin);
     this.power = 0.0;
@@ -304,18 +363,25 @@ class App {
 
   _humanTurn() { return this.game.current === 0; }
 
+  /**
+   * Power only. The direction was settled when the press locked it, so this
+   * measures how far the pointer has been dragged BACK along the cue line and
+   * nothing else: sideways wobble changes neither the aim nor the strength,
+   * and a forward drag never fires. Same rule as bloob's `power(start,end,angle)`,
+   * which discards any pull more than 90 deg off the cue.
+   */
   _updatePull() {
-    if (!this.pulling) return;
+    if (!this.pulling || !this.pull_from) return;
     const cue = this.game.cue();
-    if (cue === null) return;
-    const [cx, cy] = this.w2s(cue.x, cue.y);
-    const dx = this.mouse[0] - cx, dy = this.mouse[1] - cy;
-    const dist = Math.hypot(dx, dy);
-    if (dist < 4) { this.power = 0.0; return; }
-    this.aim_angle = Math.atan2(-dy, -dx);
-    // gamma curve: the first part of the drag stays gentle so soft touches
+    if (cue === null) { this.power = 0.0; return; }
+    const ux = Math.cos(this.aim_angle), uy = Math.sin(this.aim_angle);
+    const dx = this.mouse[0] - this.pull_from[0];
+    const dy = this.mouse[1] - this.pull_from[1];
+    this.pull_len = Math.max(0.0, Math.min(MAX_DRAG, -(dx * ux + dy * uy)));
+    if (this.pull_len < 2.0) { this.power = 0.0; return; }
+    // gamma curve: the first part of the pull stays gentle so soft touches
     // are easy to hit, and only the last stretch reaches a full stroke
-    const frac = Math.min(1.0, dist / MAX_DRAG);
+    const frac = this.pull_len / MAX_DRAG;
     this.power = MIN_LAUNCH + Math.pow(frac, 1.35) * (MAX_LAUNCH - MIN_LAUNCH);
   }
 
@@ -365,6 +431,9 @@ class App {
 
   tick() {
     if (this.phase !== "play") return;
+    // keep the aim on the cursor even when the cue ball itself moved (a shot
+    // resolved, the cue was replaced) — the pointer has not had to move
+    this._aimAt(this.mouse);
     this._updatePull();
     this._updateEffects();
     if (this.strike_t > 0) this.strike_t = Math.max(0.0, this.strike_t - 0.26);
@@ -1121,7 +1190,7 @@ class App {
     this._renderShotLine(cue, this.aim_angle);
     const [cx, cy] = this.w2s(cue.x, cue.y);
     const r = Math.max(4, cue.radius * this.scale);
-    const frac = this.pulling ? this.power / MAX_LAUNCH : 0.0;
+    const frac = this.pulling ? this.pull_len / MAX_DRAG : 0.0;
     // the cue draws back as the player pulls, and sits just off the ball idle
     const gap = r * 1.25 + frac * r * 3.6;
     // english is shown, not told: the cue is laid across the ball face, so a
@@ -1389,7 +1458,7 @@ class App {
     this._text(msg, 20, 54, 14.5, "#c2c8d3", "left", 400);
 
     if (this.phase === "play" && this._humanTurn() && !this.await_place && !this.simulating) {
-      this._text("drag back from the cue ball to aim  ·  farther = harder  ·  "
+      this._text("aim with the mouse  ·  press, then drag back to load the cue  ·  "
         + "english: click the spin dial (double-click re-centres)",
         20, WIN_H - 16, 12, "#8b929e", "left", 400);
     }
