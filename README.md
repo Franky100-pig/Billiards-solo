@@ -33,10 +33,22 @@ No install, no local server, no network:
 - **Ball-in-hand** — click/tap inside the allowed area to place the cue ball.
 - **Aim & shoot** — press & hold, drag **away** from the cue (slingshot), release. Pull distance = power;
   the shot travels opposite the drag.
+- **English (加塞)** — click inside the spin dial on the right to move the strike point. Drag the dot to the
+  bottom and the shot is a **draw**, to the top a **follow**, left/right gives **side spin**. Double-click the
+  dial (or press **S**) to re-centre it. The cue itself is drawn off-centre, matching the strike point.
 - **R / Esc** — back to the menu.
 
 The drag is gamma-shaped (`power = min + frac^1.35 · range`), so the first third of the pull is a soft touch
 and only the last stretch reaches a full stroke. A live `POWER n%` bar makes it easy to judge.
+
+### Pacing
+
+The table runs in **real time**: a fixed 240 Hz integration step, 4 substeps per 60 Hz frame — i.e. exactly
+1/60 s of table time per frame, no matter how fast the display refreshes. (The earlier build ran 16 steps of
+1/360 s per frame, so every ball moved **2.7× faster than reality** and collisions were over before you could
+read them.) The speeds that come out are the physical ones: a medium stroke is ~200–400 units/s, i.e.
+0.35–0.7 table-lengths a second, and such a ball takes 3–4 s to run the length of the table and settle.
+A hard break takes ~8 s to play itself out, which is about right for fifteen balls on two rails.
 
 ### Presentation
 
@@ -52,6 +64,12 @@ and only the last stretch reaches a full stroke. A live `POWER n%` bar makes it 
 - **The shot line.** The cue-ball path to first contact, the **ghost ball** at that contact point, the object
   ball's line (clipped to the first ball or cushion in the way, and pulsing the pocket when it is lined up),
   and the cue ball's deflection afterwards — all from pure geometry, recomputed every frame.
+- **Dropping into a pocket.** A potted ball is no longer deleted on the frame it is captured. It slides the
+  last few units into the pocket, shrinks, fades, and disappears under a rim shadow clipped to the pocket
+  mouth, while the pocket flashes a ripple and the cloth dims around it. Contact also sprays a short ring of
+  spark dots at the impact point, so you can *see* which pair of balls touched and how hard.
+
+![Pocket drop](docs/screenshots/pocket.png)
 
 ### Why it really is offline
 - Plain classic `<script>` tags (no ES modules), so opening the file via `file://` works — **no `http.server` needed**.
@@ -74,7 +92,7 @@ Same menu, controls and rules as the web build.
 web/                     offline web page — Canvas 2D, zero dependencies
   index.html
   css/style.css
-  js/physics.js          deterministic top-down physics
+  js/physics.js          deterministic top-down physics (angular momentum, cloth slip, throw)
   js/rules8ball.js       8-ball state machine (groups, fouls, win/loss)
   js/rulesSnooker.js     snooker state machine (reds/colours, re-spot, scoring)
   js/bot.js              ghost-ball AI (path clearance + cloned-world simulation)
@@ -133,18 +151,39 @@ balls in the real snooker colours (ivory cue ball).
 
 ## Physics & rules highlights
 
-- Deterministic top-down 2D physics: circle-circle elastic impulses, circle-segment cushion reflection,
-  exponential friction, and **segment-based pocket capture** (so fast balls can't tunnel past a pocket).
-- Ball-ball restitution `0.9`, ball-cushion `0.75`, mass `3`, sleep speed `5`, `20` solver iterations —
-  constants extracted from bloob (see `docs/REA_findings.md`).
+- Deterministic top-down 2D physics: circle-circle impulses, circle-segment cushion reflection, and
+  **segment-based pocket capture** (so fast balls can't tunnel past a pocket). Fixed 1/240 s step, 2 contact
+  passes per step, `I = ⅖ m r²`, restitution `0.93` ball-ball and `0.72` ball-cushion, speed damping
+  `v *= 0.55 per second` (`DAMPING = 0.45`, the same figure bloob uses — see `docs/REA_findings.md`).
 - Standard 8-ball: open table, group assignment, the meaningful foul set, premature-8 = loss, legal-8 = win.
 - Standard snooker: 15 reds + 6 colours, red→colour scoring, colour re-spotting, ascending end-game order,
   foul penalty = `max(4, value of ball first hit, value of ball potted)`.
 
+### Real angular momentum (draw / follow / throw)
+
+bloob's own spin is cosmetic: the dial tweaks the contact material (`friction = 1 + 0.3·my`,
+`restitution = .9 + .45·my`) and rotates the *cue ball's velocity* by `0.25·mx` radians once after the first
+contact. Nothing ever gets an angular impulse, so a real draw shot is impossible there. This build replaces
+it with the actual mechanics of a sphere on cloth:
+
+- Every ball carries `(wx, wy)` — the rolling axis — plus `wz`, side spin about the vertical.
+- The contact patch slips at `u = (vx − r·wy, vy + r·wx)`. While `u ≠ 0` the cloth applies Coulomb friction
+  `a = μ_slip·g`, and the friction force also spins the ball up: the slip decays at `(1 + m r²/I) = 3.5×` the
+  rate the linear velocity does. That factor is the whole reason a draw shot checks up and comes back.
+- The strike point sets the spin directly: for tip offset `h` (fraction of the ball radius) at cue speed `v`,
+  `w = 2.5·h·v/r`. `h = 0` is a stun, `h = 0.4` is natural roll, and `h < 0` is back-spin.
+- Ball-ball contact applies a tangential friction impulse (`μ_ball = 0.055`), so a cut shot **throws** the
+  object ball off the geometric line and a spinning cue ball is deflected by the throw it imparts.
+- Cushions apply a tangential impulse too (`μ_cushion = 0.17`), so side spin bends the rebound angle instead
+  of being decoration, and `wz` bleeds off as the ball runs along the rail.
+- A ball is only parked when its **speed and its slip** are both small, so a stationary-looking ball with
+  back-spin left still bites and rolls back.
+
 > **Modelling note (playability):** bloob's literal `hole.radius` (5 / 11) is smaller than the ball, so a
-> shot aimed at a pocket would miss. Capture radius is relaxed to **1.5× ball radius**, and the friction
-> model uses the standard per-second exponential decay (`v *= exp(-0.45·t)`) since the exact integration
-> model is not statically reachable. Both decisions are documented in `physics.py` / `docs/REA_findings.md`.
+> shot aimed at a pocket would miss. Capture radius is relaxed to **1.5× ball radius**. The damping model is
+> not a guess any more: the real engine chunk (`PoolScene-*.js`) turned out to be statically reachable, and
+> its `applyDamping` is Matter's `v *= (1 − d)^dt` at 240 Hz — which is exactly the per-second
+> `v *= exp(−0.45·t)` used here. Both decisions are documented in `physics.py` / `docs/REA_findings.md` §9.
 
 ## Fixed while porting to the web
 
@@ -160,15 +199,21 @@ The JavaScript port surfaced three genuine bugs that also affected the Python bu
 
 ## Verification
 
-- **Logic (Node, headless): 23/23** — physics settles; rolling advances with travel; a full 8-ball frame
-  completes; **no ball ever leaves the table**; the bot's strokes stay inside the power envelope and average
-  well below the cap; snooker reds decrement consistently; colours pot in ascending order.
+- **Physics & logic (Node, headless): 26/26** — the table settles; rolling advances exactly with travel; a
+  full 8-ball frame completes; **no ball ever leaves the table**; the bot's strokes stay inside the power
+  envelope and average well below the cap; snooker reds decrement consistently; colours pot in ascending
+  order. Plus the new mechanics: a back-spin stroke **draws back**, a top-spin stroke **follows through**, a
+  stun stops dead, side spin **throws** the object ball off line and **bends** the cushion rebound, and a
+  coasting ball's speed follows `v₀·e^(−0.45 t)` to within a few per cent.
 - **Position play & escapes (Node, headless): 6/6** — a deliberately snookered cue finds a one-rail kick that
   contacts the ball on, stays on the table, and the 8-ball / snooker frames still finish.
-- **UI wiring (headless DOM/Canvas): 30/30** — menu → start → place → aim → pull → strike → resolve → bot
-  turn, for both modes, plus the game-over overlay and a monotonic power curve from a soft tap to a full
-  stroke.
+- **UI wiring (headless DOM/Canvas): 32/32** — menu → start → place → aim → pull → strike → resolve → bot
+  turn, for both modes, plus the game-over overlay, a monotonic power curve from a soft tap to a full stroke,
+  the spin dial setting the strike point, and ball-in-hand on both tables.
 - Screenshots above are real renders captured with headless Chrome.
+
+The bot search is a **generator** that is drained in ~7 ms slices per frame, so choosing a shot never freezes
+the page — the bot "thinks" while the table keeps rendering.
 
 ## Scope / progress
 
@@ -183,6 +228,9 @@ The JavaScript port surfaced three genuine bugs that also affected the Python bu
 - [x] Bot position play (走位) + one-rail escape shots
 - [x] Rolling-ball animation, drawn cue and the full aiming aid
 - [x] Measured bot power (no more "everything at maximum")
+- [x] **True angular momentum physics** — draw, follow, stun, throw and spin-bent cushions
+- [x] **Real-time pacing** (240 Hz, exactly 1/60 s per frame) and a clickable english dial
+- [x] Pocket-drop animation, contact sparks and pocket ripples
 - [x] Offline verification: 8-ball and snooker can be played to completion
 - [x] Hosted copies: GitHub Pages & WorkBuddy
 
@@ -210,6 +258,26 @@ bot 除 ghost-ball 进球搜索外，新增**走位评估**（打完球后母球
 `power = k·(母球到假想球距离 + 目标球到袋距离 / cos(切角))`，薄球按法向分量补偿。实测一整局 8 球
 力度落在 ~130–1000（上限 1350），只有开球是刻意发力。玩家侧拖拽用 gamma 曲线，前 1/3 是轻推，
 后段才到满杆，并实时显示 `POWER n%`。
+
+**节奏**：台面现在按**真实时间**跑——固定 240 Hz 积分步长、每帧 4 个子步，也就是每帧恰好推进 1/60 秒
+的台面时间。旧版本每帧跑 16 个 1/360 秒的步，等于所有球**快 2.7 倍**，碰撞在看清之前就结束了，这就是
+"基础速度太快、反应不过来"的根因。
+
+**碰撞**：每颗球都带真正的角速度（`wx, wy` 滚动轴 + `wz` 侧旋）。接触点打滑时台呢给的是库仑摩擦，
+摩擦力同时把球"转"起来，所以滑移衰减比线速度衰减快 `1 + mr²/I = 3.5` 倍——这正是低杆能缩回来、高杆
+能跟进的原因。球球接触带切向摩擦冲量（`μ = 0.055`），所以切球会**甩**目标球（throw），带旋的母球也会
+被甩偏；库边同样有切向冲量（`μ = 0.17`），侧旋会真的改变反弹角，而不是装饰。球只有在**速度和滑移都
+很小**时才会停下，所以"看着不动但还有后旋"的球会继续咬地往回滚。
+
+**加塞**：右侧旋钮点一下就把击球点挪过去，拖到下面是**低杆**、上面是**高杆**、左右是**侧塞**，双击
+（或按 S）回中；球杆画出来时也会偏离球心，和击球点一致。击球点偏移 `h` 直接决定角速度 `w = 2.5·h·v/r`。
+
+**进袋**：进袋不再"一帧消失"。球会滑进袋口最后几个单位、缩小、淡出，并在一道裁剪到袋口的袋沿阴影下
+消失，同时袋口泛起涟漪、附近台呢变暗；碰撞点还会溅出一圈短促的火花点，能看清是哪两颗球撞了、多重。
+
+> 顺带一提：bloob 自己的加塞是"假"的——旋钮只改接触材质（`friction = 1 + 0.3·my`、
+> `restitution = .9 + .45·my`），`mx` 只在第一次接触后把母球**速度**转 `0.25·mx` 弧度一次，全程没有任何
+> 角冲量，所以它做不出真正的低杆。这里换成了真角动量（详见 `docs/REA_findings.md` §9、§11）。
 
 ---
 
