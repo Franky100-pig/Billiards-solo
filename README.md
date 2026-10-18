@@ -34,8 +34,15 @@ draw. This is the same dial the stroke animation and the physics read, not a sep
 
 ![draw, dialled with the down arrow](docs/screenshots/english.png)
 
+The break has to come from behind the head string, so while you are picking a spot the legal quarter is
+shaded and a click outside it is refused with an explanation:
+
+![break placement behind the head string](docs/screenshots/break_line.png)
+
 ### Controls
-- **Ball-in-hand** — click/tap inside the allowed area to place the cue ball.
+- **Ball-in-hand** — click/tap a clear spot to place the cue ball. After a foul that is anywhere on the
+  table; **on the break it must be behind the head string**, so the legal quarter of the table is shaded
+  until the ball is down. A refused spot says why.
 - **Aim** — just move the cursor. The aim is the ray **from the cue ball to the pointer**, so the line,
   the ghost ball and the cue all point where you are looking. (Clicking is not what aims.)
 - **Power** — press anywhere to **lock** that direction, then drag **back** along the cue and release. The
@@ -96,7 +103,10 @@ pip install -r requirements.txt
 python src/main.py
 ```
 
-Same menu, controls and rules as the web build.
+Same menu, controls and rules as the web build — including the shaded kitchen while you place the cue ball
+for the break:
+
+![desktop break placement](docs/screenshots/break_line_desktop.png)
 
 ## Layout
 
@@ -168,8 +178,28 @@ balls in the real snooker colours (ivory cue ball).
   passes per step, `I = ⅖ m r²`, restitution `0.93` ball-ball and `0.72` ball-cushion, speed damping
   `v *= 0.55 per second` (`DAMPING = 0.45`, the same figure bloob uses — see `docs/REA_findings.md`).
 - Standard 8-ball: open table, group assignment, the meaningful foul set, premature-8 = loss, legal-8 = win.
+- **The break is played from the kitchen.** The cue ball goes behind the head string (the quarter nearest the
+  head rail); the quarter is shaded while you choose a spot, and a click past the line is refused with the
+  reason spelled out instead of silently doing nothing. Ball-in-hand after a foul is anywhere on the table.
+- **A stroke too soft to reach a cushion is a foul.** After contact either a ball must drop or something must
+  reach a rail; if neither happens the shot was not legal and the table passes over with ball in hand. This is
+  the standard answer to "I barely touched it", and it is why the bot now refuses to play such a shot (see
+  below).
 - Standard snooker: 15 reds + 6 colours, red→colour scoring, colour re-spotting, ascending end-game order,
   foul penalty = `max(4, value of ball first hit, value of ball potted)`.
+
+The bot is held to the same rule. Before a candidate stroke is scored it re-simulates the shot, and if the
+shot would leave everything short it raises the power 45 % at a time until a ball reaches a rail or drops.
+A stroke that was made legal that way is not allowed to jitter back below that threshold, since the power
+jitter that models a human touch would otherwise undo the fix. Measured over six bot-vs-bot frames, that took
+the bot's soft-foul rate from 19 % of strokes to 4 % — the remainder come from the *aim* jitter thinning a
+contact out, which is a miss a human would make too.
+
+The desktop build got the same treatment, and checking it against the same measurement caught a port that had
+never received the break fix: the pygame bot was still aiming at the **deepest** ball in the pack instead of
+the nearest one, so on half of its breaks it walked its own cue ball through the rack and scratched. Aiming at
+the apex fixed that, and over 97 bot strokes the desktop bot now plays **no** soft fouls at all and breaks
+cleanly 11 times out of 12 (8–10 balls reaching a rail).
 
 ### Real angular momentum (draw / follow / throw)
 
@@ -211,7 +241,7 @@ The JavaScript port surfaced three genuine bugs that also affected the Python bu
 
 ## Verification
 
-- **Physics & logic (Node, headless): 26/26** — the table settles; rolling advances exactly with travel; a
+- **Physics & logic (Node, headless): 45/45** — the table settles; rolling advances exactly with travel; a
   full 8-ball frame completes; **no ball ever leaves the table**; the bot's strokes stay inside the power
   envelope and average well below the cap; snooker reds decrement consistently; colours pot in ascending
   order. Plus the new mechanics: a back-spin stroke **draws back**, a top-spin stroke **follows through**, a
@@ -219,7 +249,7 @@ The JavaScript port surfaced three genuine bugs that also affected the Python bu
   coasting ball's speed follows `v₀·e^(−0.45 t)` to within a few per cent.
 - **Position play & escapes (Node, headless): 6/6** — a deliberately snookered cue finds a one-rail kick that
   contacts the ball on, stays on the table, and the 8-ball / snooker frames still finish.
-- **UI wiring (headless DOM/Canvas): 64/64** — menu → start → place → aim → pull → strike → resolve → bot
+- **UI wiring (headless DOM/Canvas): 71/71** — menu → start → place → aim → pull → strike → resolve → bot
   turn, for both modes, plus the game-over overlay, a monotonic power curve from a soft tap to a full stroke,
   the spin dial setting the strike point, and ball-in-hand on both tables. The aim/power split has its own
   cases: pointing right aims right (not left), pointing up aims up, jitter sitting on the ball is ignored,
@@ -232,6 +262,14 @@ The JavaScript port surfaced three genuine bugs that also affected the Python bu
   shot fired from the centre and after five ↓ differ *only* in spin — the centre ball leaves with no rolling
   spin at all, the down-arrow ball leaves with a real backspin, and both settle without anything leaving the
   table.
+- **Rules (in the 45 above)** — a spot past the head string is refused on the break and the same click
+  inside the kitchen is accepted, with the centre allowed to sit exactly on the line and one unit past it
+  not; ball-in-hand is unrestricted once the break is over; an overlapping ball is refused with a reason. On
+  an empty table, a stroke that touches a ball and dies without reaching a cushion is a foul
+  (`NO_CUSHION_AFTER_CONTACT`) with ball in hand to the opponent, the same stroke at pace is legal, and a
+  ball potted with no rail contact at all is still legal.
+- **Pygame build (same rules)** — the identical scenarios run against `src/`: head string, refusal message,
+  and both the soft and the hard stroke, plus a headless `SDL_VIDEODRIVER=dummy` render of the break frame.
 - Screenshots above are real renders captured with headless Chrome.
 
 The bot search is a **generator** that is drained in ~7 ms slices per frame, so choosing a shot never freezes
@@ -294,6 +332,18 @@ bot 除 ghost-ball 进球搜索外，新增**走位评估**（打完球后母球
 能跟进的原因。球球接触带切向摩擦冲量（`μ = 0.055`），所以切球会**甩**目标球（throw），带旋的母球也会
 被甩偏；库边同样有切向冲量（`μ = 0.17`），侧旋会真的改变反弹角，而不是装饰。球只有在**速度和滑移都
 很小**时才会停下，所以"看着不动但还有后旋"的球会继续咬地往回滚。
+
+**规则**：开球必须从**头线后面**打——母球要放在靠头库那一/四区（"厨房"）里，选位时这块区域会淡绿高亮，
+点到线外会被拒绝并直接告诉你原因，而不是"点了没反应"。犯规后的自由球可以放在台面任意位置。
+另一条按标准规则补上的是**击球过轻**：接触目标球之后，必须要么有球进袋、要么有球碰到库边，两样都没有
+就是犯规，把台面交给对手。这条以前缺失，所以"轻轻一碰"不会受罚。机器人也被这条规则约束——它在给
+候选杆打分前会重新模拟一遍，如果这一杆打完谁都没碰库，就把力度按 45% 递增加码，直到有球碰库或进袋；
+这样加过力的杆不会因为模拟人手抖动的随机衰减而退回不合格的力度。实测（6 局机器人对局）这条把机器人的
+"过轻犯规"从 19% 压到 4%，剩下的来自瞄准抖动把接触打薄，属于真人也会犯的失误。
+
+桌面版也照同一条规则改，而拿同一套测量去核对时直接抓出一个从没同步过的 bug：pygame 机器人开球时瞄的是
+球堆**最里面**那颗，而不是最近的那颗，结果一半的开球母球直接穿过球堆、摔袋。改瞄顶点之后，97 杆里**一次
+过轻犯规都没有**，12 次开球有 11 次干净（8–10 颗球碰库）。
 
 **加塞**：右侧旋钮点一下就把击球点挪过去，拖到下面是**低杆**、上面是**高杆**、左右是**侧塞**；也可以
 直接用 **↑ ↓ ← →** 一格一格走（每格 0.2 个球半径，按住 **Shift** 变成 0.05 的细调）。击球点不会走出球
