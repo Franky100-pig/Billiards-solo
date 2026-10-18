@@ -15,13 +15,23 @@
 const WIN_W = 960, WIN_H = 660;
 const HUD_TOP = 78, HUD_BOTTOM = 56;
 const RAIL = 26;
-const ANIM_H = 1.0 / 360.0;
-const SUBSTEPS_PER_FRAME = 16;
+// Real time. The simulation runs at 240 Hz (as bloob does) and we advance four
+// substeps per 60 Hz frame, i.e. exactly 1/60 s of table time per frame. The
+// old build stepped 16 x 1/360 = 44 ms per frame, so every shot played at
+// 2.7x speed — which is why the balls looked like pinballs.
+const ANIM_H = 1.0 / 240.0;
+const SUBSTEPS_PER_FRAME = 4;
 // Stroke speeds match the physics: a ball launched at v coasts v / DAMPING
-// (~0.45) table units, so 1350 crosses the table three times and 70 is a tap.
+// (~0.45) table units, so 1350 crosses the table four times and 40 is a tap.
 const MAX_LAUNCH = 1350.0;
-const MIN_LAUNCH = 70.0;
+const MIN_LAUNCH = 40.0;
 const MAX_DRAG = 205.0;
+// Pocket drop animation (presentation only; the ball is already pocketed).
+const SINK_TIME = 0.42;
+
+// Spin dial: the tip contact point on the cue ball. Screen offsets in units of
+// the ball radius; +x = right english, +y = top spin.
+const DIAL_DEFAULT = [0.0, 0.45];
 
 // 8-ball colours (number -> rgb); 9-15 reuse 1-7 as stripes
 const EIGHT_COLORS = {
@@ -95,6 +105,7 @@ class App {
     this.pending_bot = false;
     this.bot_think_frames = 0;
     this.bot_aim = null;        // [angle, power] the bot has settled on
+    this.bot_search = null;     // generator for the incremental shot search
     this.aim_angle = 0.0;
     this.power = 0.0;
     this.overBtn = null;
@@ -103,6 +114,12 @@ class App {
     this.strike_from = null;
     this.strike_angle = 0.0;
     this.strike_power = 0.0;
+    // english (加塞): tip offset on the cue ball, [right, top]
+    this.spin = DIAL_DEFAULT.slice();
+    this.spin_drag = false;
+    // presentation: contact sparks and pocket drops
+    this.fx = [];
+    this.pocket_flash = [];
 
     this._buildMenu();
     this._bindInput();
@@ -150,11 +167,17 @@ class App {
     this.pending_bot = false;
     this.bot_think_frames = 0;
     this.bot_aim = null;
+    this.bot_search = null;
     this.power = 0.0;
     this.aim_angle = 0.0;
     this.overBtn = null;
     this.strike_t = 0.0;
     this.strike_from = null;
+    this.spin = DIAL_DEFAULT.slice();
+    this.spin_drag = false;
+    this.fx = [];
+    this.pocket_flash = [];
+    for (const b of this.game.world.balls) b._sink = null;
     this.await_place = !!this.game.ball_in_hand;
   }
 
@@ -169,9 +192,17 @@ class App {
     });
     window.addEventListener("pointermove", (e) => {
       this.mouse = getPos(this.canvas, e);
+      if (this.spin_drag) this._setSpinFrom(this.mouse);
     });
     window.addEventListener("pointerup", (e) => {
+      if (this.spin_drag) { this.spin_drag = false; return; }
       this.onRelease(getPos(this.canvas, e));
+    });
+    this.canvas.addEventListener("dblclick", (e) => {
+      const pos = getPos(this.canvas, e);
+      if (this.phase === "play" && this._inDial(pos)) {
+        this.spin = DIAL_DEFAULT.slice();
+      }
     });
     window.addEventListener("keydown", (e) => {
       if (e.key === "r" || e.key === "R" || e.key === "Escape") {
@@ -179,8 +210,33 @@ class App {
         this.pulling = false;
         this.simulating = false;
         this.pending_bot = false;
+        this.bot_search = null;
+        this.spin_drag = false;
+      } else if (e.key === "s" || e.key === "S") {
+        // re-centre the english dial (no draw, no follow, no side)
+        this.spin = DIAL_DEFAULT.slice();
       }
     });
+  }
+
+  // -- spin dial ---------------------------------------------------------
+  _dialCenter() { return [WIN_W - 54, 40]; }
+  _dialRadius() { return 25; }
+
+  _inDial(pos) {
+    const [cx, cy] = this._dialCenter();
+    const R = this._dialRadius();
+    return Math.hypot(pos[0] - cx, pos[1] - cy) <= R + 6;
+  }
+
+  _setSpinFrom(pos) {
+    const [cx, cy] = this._dialCenter();
+    const R = this._dialRadius();
+    let sx = (pos[0] - cx) / (R * 0.80);
+    let sy = -(pos[1] - cy) / (R * 0.80);
+    const m = Math.hypot(sx, sy);
+    if (m > 1.0) { sx /= m; sy /= m; }
+    this.spin = [sx, sy];
   }
 
   _hit(rect, pos) {
@@ -205,6 +261,11 @@ class App {
       return;
     }
     // play
+    if (this._humanTurn() && this._inDial(pos)) {
+      this.spin_drag = true;
+      this._setSpinFrom(pos);
+      return;
+    }
     if (this.await_place) {
       const [wx, wy] = this.s2w(pos[0], pos[1]);
       if (this.game.place_cue(wx, wy)) {
@@ -221,21 +282,23 @@ class App {
     this.pulling = false;
     if (this.power < MIN_LAUNCH * 0.6) { this.power = 0.0; return; }
     if (this.game.cue() === null) return;
-    this._strike(this.aim_angle, this.power);
+    this._strike(this.aim_angle, this.power, this.spin);
     this.power = 0.0;
   }
 
   /** Fire the cue ball and start the strike animation. */
-  _strike(angle, power) {
+  _strike(angle, power, spin = null) {
     const cue = this.game.cue();
     this.strike_from = cue ? [cue.x, cue.y] : null;
     this.strike_angle = angle;
     this.strike_power = power;
+    this.strike_spin = spin ? [spin[0], spin[1]] : [0.0, 0.0];
     this.strike_t = 1.0;
-    this.game.launch(angle, power);
+    this.game.launch(angle, power, spin);
     this.simulating = true;
     this.pending_bot = false;
     this.bot_aim = null;
+    this.bot_search = null;
     this.await_place = false;
   }
 
@@ -259,6 +322,7 @@ class App {
   // -- turn flow ---------------------------------------------------------
   afterResolve() {
     const g = this.game;
+    this.bot_search = null;
     if (g.winner !== null) { this.phase = "over"; this.overBtn = null; return; }
     this.await_place = !!g.ball_in_hand;
     if (g.current === 1) {
@@ -278,7 +342,6 @@ class App {
     }
     this._strike(pre[0], pre[1]);
   }
-
   // -- loop --------------------------------------------------------------
   start() {
     let last = performance.now(), acc = 0;
@@ -295,9 +358,15 @@ class App {
     requestAnimationFrame(step);
   }
 
+  _now() {
+    return (typeof performance !== "undefined" && performance.now)
+      ? performance.now() : Date.now();
+  }
+
   tick() {
     if (this.phase !== "play") return;
     this._updatePull();
+    this._updateEffects();
     if (this.strike_t > 0) this.strike_t = Math.max(0.0, this.strike_t - 0.26);
     if (this.simulating) {
       for (let i = 0; i < SUBSTEPS_PER_FRAME; i++) {
@@ -311,12 +380,65 @@ class App {
       }
     } else if (this.pending_bot) {
       this.bot_think_frames++;
-      // think, show the cue at the chosen line for a moment, then strike
-      if (this.bot_think_frames >= 6 && this.bot_aim === null) {
+      if (this.bot_search === null && this.bot_aim === null) {
         if (this.game.ball_in_hand) this.game.auto_place_cue();
-        this.bot_aim = chooseShot(this.game, this.difficulty);
+        this.bot_search = shotSearch(this.game, this.difficulty);
       }
-      if (this.bot_think_frames > 20) this.doBotTurn(this.bot_aim);
+      // Spend a slice of every frame on the search instead of blocking the
+      // animation for a second: the bot visibly lines up while it thinks.
+      if (this.bot_search !== null) {
+        const t0 = this._now();
+        while (this._now() - t0 < 7.0) {
+          const r = this.bot_search.next();
+          if (r.done) {
+            this.bot_aim = r.value;
+            this.bot_search = null;
+            break;
+          }
+        }
+      }
+      if (this.bot_aim && this.bot_think_frames > 26) this.doBotTurn(this.bot_aim);
+    }
+  }
+
+  /**
+   * Presentation-only effects: contact sparks from the solver, and the ball
+   * dropping into a pocket. Physics hands us `world.fx` once per shot step;
+   * the drop is tracked here so the simulation stays free of animation state.
+   */
+  _updateEffects() {
+    const w = this.game.world;
+    if (w.fx && w.fx.length) {
+      for (const e of w.fx) {
+        if (this.fx.length >= 40) break;
+        this.fx.push({ x: e.x, y: e.y, str: e.str, kind: e.kind, t: 0.0 });
+      }
+      w.fx.length = 0;
+    }
+    const dt = 1.0 / 60.0;
+    for (const e of this.fx) e.t += dt;
+    if (this.fx.length) this.fx = this.fx.filter(e => e.t < 0.34);
+    for (const p of this.pocket_flash) p.t += dt;
+    if (this.pocket_flash.length) {
+      this.pocket_flash = this.pocket_flash.filter(p => p.t < 0.6);
+    }
+
+    for (const b of w.balls) {
+      if (b.pocketed) {
+        if (!b._sink) {
+          let best = [b.x, b.y], bd = Infinity;
+          for (const p of w.pockets) {
+            const d = Math.hypot(b.x - p[0], b.y - p[1]);
+            if (d < bd) { bd = d; best = p; }
+          }
+          b._sink = { from: [b.x, b.y], to: [best[0], best[1]], t: 0.0 };
+          this.pocket_flash.push({ x: best[0], y: best[1], t: 0.0 });
+        } else {
+          b._sink.t += dt;
+        }
+      } else if (b._sink) {
+        b._sink = null;
+      }
     }
   }
 
@@ -344,6 +466,7 @@ class App {
           this._renderCue(bx, by, this.bot_aim[0], r * 2.0, 0.9);
         }
       }
+      this._drawEffects();
       this._renderHud();
       if (this.phase === "over") this._renderOver();
     }
@@ -578,10 +701,16 @@ class App {
     void x0;
   }
 
-  _drawBall(b) {
+  _drawBall(b, over) {
     const ctx = this.ctx;
-    const [sx, sy] = this.w2s(b.x, b.y);
-    const r = Math.max(4, b.radius * this.scale);
+    let sx, sy, r;
+    if (over) {
+      sx = over.sx; sy = over.sy; r = Math.max(2, over.r);
+    } else {
+      const p = this.w2s(b.x, b.y);
+      sx = p[0]; sy = p[1];
+      r = Math.max(4, b.radius * this.scale);
+    }
     const info = ballColor(b, this.snooker);
     const fill = rgb(info.fill);
 
@@ -725,9 +854,94 @@ class App {
   }
 
   _renderBalls() {
-    for (const b of this.game.world.balls) {
-      if (b.pocketed) continue;
-      this._drawBall(b);
+    const w = this.game.world;
+    for (const b of w.balls) {
+      if (!b.pocketed) { this._drawBall(b); continue; }
+      if (b._sink && b._sink.t < SINK_TIME) this._drawSinkingBall(b);
+    }
+  }
+
+  /**
+   * A ball dropping into a pocket: it slides the last few units to the mouth,
+   * shrinks as it passes the lip and fades out under the rim, all clipped to
+   * the pocket so the cloth never shows a stray circle. Without this the ball
+   * simply blinked out of existence, which read as a bug.
+   */
+  _drawSinkingBall(b) {
+    const ctx = this.ctx;
+    const s = b._sink;
+    const p = Math.min(1.0, s.t / SINK_TIME);
+    const slide = Math.min(1.0, p * 2.1);            // ease into the mouth
+    const wx = s.from[0] + (s.to[0] - s.from[0]) * slide;
+    const wy = s.from[1] + (s.to[1] - s.from[1]) * slide;
+    const [sx, sy] = this.w2s(wx, wy);
+    const r0 = Math.max(4, b.radius * this.scale);
+    const shrink = Math.max(0.0, (p - 0.28) / 0.72);
+    const r = r0 * (1.0 - 0.72 * shrink);
+    const alpha = 1.0 - Math.max(0.0, (p - 0.50) / 0.50);
+    const [px, py] = this.w2s(s.to[0], s.to[1]);
+    const pr = this.game.world.capture_radius * this.scale * 1.02;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(px, py, pr, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.globalAlpha = Math.max(0.0, alpha);
+    this._drawBall(b, { sx, sy, r });
+    ctx.restore();
+
+    // the lip of the pocket darkens over the ball as it drops
+    if (p > 0.45) {
+      const k = (p - 0.45) / 0.55;
+      const g = ctx.createRadialGradient(px, py, pr * 0.25, px, py, pr);
+      g.addColorStop(0, `rgba(0,0,0,${0.55 * k})`);
+      g.addColorStop(0.7, `rgba(0,0,0,${0.85 * k})`);
+      g.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(px, py, pr, 0, Math.PI * 2);
+      ctx.clip();
+      ctx.fillStyle = g;
+      ctx.fillRect(px - pr, py - pr, 2 * pr, 2 * pr);
+      ctx.restore();
+    }
+  }
+
+  /** Contact sparks and the ripple when a ball drops. */
+  _drawEffects() {
+    const ctx = this.ctx;
+    for (const e of this.fx) {
+      const p = e.t / 0.34;
+      const [sx, sy] = this.w2s(e.x, e.y);
+      const rail = e.kind === "rail";
+      const rr = (rail ? 4.0 : 5.0) + p * (rail ? 9.0 : 15.0);
+      const a = (1.0 - p) * (rail ? 0.30 : 0.42) * (0.35 + e.str * 0.65);
+      ctx.save();
+      ctx.strokeStyle = `rgba(255,255,255,${a.toFixed(3)})`;
+      ctx.lineWidth = rail ? 1.4 : 1.8;
+      ctx.beginPath();
+      ctx.arc(sx, sy, rr, 0, Math.PI * 2);
+      ctx.stroke();
+      if (!rail && e.str > 0.35) {
+        ctx.fillStyle = `rgba(255,255,255,${(a * 0.55).toFixed(3)})`;
+        ctx.beginPath();
+        ctx.arc(sx, sy, 1.6 * (1.0 - p * 0.6), 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    for (const f of this.pocket_flash) {
+      const p = f.t / 0.6;
+      const [sx, sy] = this.w2s(f.x, f.y);
+      const r0 = this.game.world.capture_radius * this.scale;
+      ctx.save();
+      ctx.strokeStyle = `rgba(150,255,190,${(1 - p) * 0.55})`;
+      ctx.lineWidth = 2.4 * (1 - p) + 0.6;
+      ctx.beginPath();
+      ctx.arc(sx, sy, r0 * (0.65 + p * 1.15), 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
     }
   }
 
@@ -910,7 +1124,23 @@ class App {
     const frac = this.pulling ? this.power / MAX_LAUNCH : 0.0;
     // the cue draws back as the player pulls, and sits just off the ball idle
     const gap = r * 1.25 + frac * r * 3.6;
-    this._renderCue(cx, cy, this.aim_angle, gap, 1.0);
+    // english is shown, not told: the cue is laid across the ball face, so a
+    // side-spin stroke visibly strikes off centre
+    const off = -this.spin[0] * r * 0.72;
+    this._renderCue(cx, cy, this.aim_angle, gap, 1.0, off);
+
+    // where the tip meets the ball (plan view): a small ring at the back edge
+    if (Math.abs(this.spin[0]) > 0.06 || Math.abs(this.spin[1]) > 0.06) {
+      const ctx = this.ctx;
+      const ux = Math.cos(this.aim_angle), uy = Math.sin(this.aim_angle);
+      const px = cx - ux * r * 0.62 - uy * off;
+      const py = cy - uy * r * 0.62 + ux * off;
+      ctx.save();
+      ctx.strokeStyle = "rgba(255,255,255,.55)";
+      ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.arc(px, py, r * 0.20, 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
+    }
   }
 
   /**
@@ -919,7 +1149,7 @@ class App {
    * Drawn in a rotated frame whose +x is the shot direction, so the cue always
    * lies along -x with its tip `gap` pixels from the cue ball's centre.
    */
-  _renderCue(px, py, ang, gap, alpha = 1.0) {
+  _renderCue(px, py, ang, gap, alpha = 1.0, off = 0.0) {
     const ctx = this.ctx;
     let L = 225;
     // Keep the whole cue on the canvas: walking back from the ball along
@@ -946,6 +1176,7 @@ class App {
     ctx.globalAlpha = alpha;
     ctx.translate(px, py);
     ctx.rotate(ang);
+    if (off) ctx.translate(0, off);
     ctx.scale(1, k);
 
     const tipX = -gap;
@@ -1032,14 +1263,15 @@ class App {
     const [px, py] = this.w2s(this.strike_from[0], this.strike_from[1]);
     const t = this.strike_t;                     // 1 -> 0
     const follow = (1.0 - t) * r * 2.6;          // drifts through the ball
+    const off = -(this.strike_spin ? this.strike_spin[0] : 0) * r * 0.72;
     this._renderCue(px, py, this.strike_angle, r * 1.35 * t - follow,
-      Math.min(1.0, t * 2.4));
+      Math.min(1.0, t * 2.4), off);
   }
 
   _renderPowerBar() {
     const ctx = this.ctx;
     const bw = 220, bh = 13;
-    const bx = WIN_W / 2 - bw / 2, by = WIN_H - 34;
+    const bx = WIN_W / 2 - bw / 2, by = WIN_H - 44;
     const frac = this.power / MAX_LAUNCH;
 
     ctx.fillStyle = "rgba(0,0,0,.40)";
@@ -1063,6 +1295,64 @@ class App {
 
     this._text(`POWER  ${Math.round(frac * 100)}%`,
       WIN_W / 2, by - 8, 11, "#9aa1ad", "center", 700);
+  }
+
+  /**
+   * The english dial: a plan-view cue ball. Click (or drag) on it to place the
+   * tip; the dot is the contact point, so up = follow, down = draw, left/right
+   * = side spin. Double-click re-centres to the default (a touch above centre).
+   */
+  _renderDial() {
+    const ctx = this.ctx;
+    const [cx, cy] = this._dialCenter();
+    const R = this._dialRadius();
+    const live = this.phase === "play" && this._humanTurn() && !this.simulating;
+
+    ctx.save();
+    ctx.globalAlpha = live ? 1.0 : 0.42;
+
+    // panel
+    ctx.beginPath(); ctx.arc(cx, cy, R + 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = "#2b2f36"; ctx.fill();
+    ctx.strokeStyle = this.spin_drag ? "rgba(160,220,190,.65)" : "rgba(255,255,255,.13)";
+    ctx.lineWidth = 1.4; ctx.stroke();
+
+    // cue ball
+    const g = ctx.createRadialGradient(cx - R * 0.35, cy - R * 0.40, R * 0.10,
+      cx + R * 0.10, cy + R * 0.20, R * 1.10);
+    g.addColorStop(0.00, "#ffffff");
+    g.addColorStop(0.55, "#f2efe6");
+    g.addColorStop(1.00, "#c9c2b2");
+    ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2);
+    ctx.fillStyle = g; ctx.fill();
+
+    // crosshair
+    ctx.strokeStyle = "rgba(30,30,30,.20)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cx - R * 0.82, cy); ctx.lineTo(cx + R * 0.82, cy);
+    ctx.moveTo(cx, cy - R * 0.82); ctx.lineTo(cx, cy + R * 0.82);
+    ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, cy, R * 0.82, 0, Math.PI * 2); ctx.stroke();
+
+    // natural-roll tick (0.4 R above centre)
+    ctx.strokeStyle = "rgba(30,30,30,.28)";
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(cx + R * 0.62, cy - R * 0.33);
+    ctx.lineTo(cx + R * 0.80, cy - R * 0.33);
+    ctx.stroke();
+
+    // the tip
+    const dx = cx + this.spin[0] * R * 0.80;
+    const dy = cy - this.spin[1] * R * 0.80;
+    ctx.beginPath(); ctx.arc(dx, dy, 4.6, 0, Math.PI * 2);
+    ctx.fillStyle = "#1d1d1f"; ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,.85)";
+    ctx.lineWidth = 1.1; ctx.stroke();
+    ctx.restore();
+
+    this._text("spin", cx - R - 9, cy + 4, 10.5, "#8b929e", "right", 600);
   }
 
   _renderHud() {
@@ -1091,7 +1381,7 @@ class App {
       msg = this.bot_aim
         ? `Bot is lining up — ${Math.round(this.bot_aim[1] / MAX_LAUNCH * 100)}% power…`
         : "Bot is thinking…";
-    } else if (this.simulating) msg = "…";
+    } else if (this.simulating) msg = "balls rolling…";
     else {
       const who = this._humanTurn() ? "Your turn" : "Bot's turn";
       msg = `${who} — ${g.message}`;
@@ -1099,10 +1389,12 @@ class App {
     this._text(msg, 20, 54, 14.5, "#c2c8d3", "left", 400);
 
     if (this.phase === "play" && this._humanTurn() && !this.await_place && !this.simulating) {
-      this._text("drag back from the cue ball to aim · the farther you pull, the harder the stroke",
-        20, WIN_H - 14, 12, "#8b929e", "left", 400);
+      this._text("drag back from the cue ball to aim  ·  farther = harder  ·  "
+        + "english: click the spin dial (double-click re-centres)",
+        20, WIN_H - 16, 12, "#8b929e", "left", 400);
     }
-    this._text("R / Esc: menu", WIN_W - 18, WIN_H - 14, 12, "#8b929e", "right", 400);
+    this._text("R / Esc: menu", WIN_W - 18, WIN_H - 16, 12, "#8b929e", "right", 400);
+    this._renderDial();
   }
 
   _renderOver() {
