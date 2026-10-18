@@ -335,6 +335,10 @@ class App {
       if (this.game.place_cue(wx, wy)) {
         this.await_place = false;
         this.game.message = "Cue placed — aim and shoot.";
+      } else {
+        // Say why: "it did nothing" is the worst possible answer to a click.
+        const why = this.game.place_refusal ? this.game.place_refusal(wx, wy) : null;
+        if (why) this.game.message = why;
       }
       return;
     }
@@ -409,6 +413,11 @@ class App {
   }
 
   _humanTurn() { return this.game.current === 0; }
+
+  /** True while the break is waiting for a cue-ball placement behind the line. */
+  _inKitchenPlacement() {
+    return !!(this.game && this.await_place && this.game.ball_in_hand_kitchen);
+  }
 
   /**
    * Power only. The direction was settled when the press locked it, so this
@@ -789,6 +798,15 @@ class App {
     }
 
     // --- 8-ball pockets: six leather-lined jaws, corners a touch wider ---
+    // The break may only be played out of the kitchen, so shade it while the
+    // player is choosing a spot: the rule becomes something you can see rather
+    // than something you discover by clicking and being refused.
+    const placing_break = this._inKitchenPlacement();
+    const hx = this.ox + this.game.head_string() * this.scale;
+    if (placing_break) {
+      ctx.fillStyle = "rgba(175,255,215,.15)";
+      ctx.fillRect(x0, y0, hx - x0, th);
+    }
     const cr = w.capture_radius * this.scale;
     for (let i = 0; i < w.pockets.length; i++) {
       const [sx, sy] = this.w2s(w.pockets[i][0], w.pockets[i][1]);
@@ -806,15 +824,12 @@ class App {
     }
 
     // head string, as on a real pool table
-    const hx = this.ox + w.width * 0.25 * this.scale;
-    ctx.strokeStyle = "rgba(238,240,228,.20)";
-    ctx.lineWidth = 1.4;
+    ctx.strokeStyle = placing_break ? "rgba(160,220,190,.60)" : "rgba(238,240,228,.20)";
+    ctx.lineWidth = placing_break ? 1.8 : 1.4;
     ctx.beginPath(); ctx.moveTo(hx, y0); ctx.lineTo(hx, y0 + th); ctx.stroke();
     const fsx = this.ox + w.width * 0.75 * this.scale;
     ctx.fillStyle = "rgba(238,240,228,.42)";
     ctx.beginPath(); ctx.arc(fsx, y0 + th / 2, 2.2, 0, Math.PI * 2); ctx.fill();
-
-    void x0;
   }
 
   _drawBall(b, over) {
@@ -1493,7 +1508,11 @@ class App {
     let msg;
     if (this.phase === "over") msg = g.message;
     else if (this.await_place && this._humanTurn()) {
-      msg = "Ball in hand — click inside the allowed area to place the cue ball.";
+      msg = this._inKitchenPlacement()
+        ? "Break — place the cue ball behind the head string (the shaded quarter)."
+        : this.snooker
+          ? "Ball in hand — place the cue ball inside the D."
+          : "Ball in hand — click anywhere on the table to place the cue ball.";
     } else if (this.pending_bot) {
       msg = this.bot_aim
         ? `Bot is lining up — ${Math.round(this.bot_aim[1] / MAX_LAUNCH * 100)}% power…`

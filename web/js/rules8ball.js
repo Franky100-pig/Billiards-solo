@@ -50,11 +50,17 @@ class EightBallGame {
         idx++;
       }
     }
-    const cue = new Ball(w.width * 0.25, w.height / 2.0, r, MASS, 0, "cue");
+    const cue = new Ball(w.width * 0.22, w.height / 2.0, r, MASS, 0, "cue");
     w.addBall(cue);
   }
 
   cue() { return this.world.cueBall(); }
+
+  /**
+   * The head string: the break has to be played from the quarter of the table
+   * nearest the head rail (the "kitchen"). World units, vertical line.
+   */
+  head_string() { return this.world.width * 0.25; }
 
   balls_by_kind(kind) {
     return this.world.balls.filter(b => b.kind === kind && !b.pocketed);
@@ -86,11 +92,36 @@ class EightBallGame {
     return this.world.balls.filter(b => nums.has(b.number) && !b.pocketed);
   }
 
+  /**
+   * Why a placement was refused, in words the player can act on. Same order of
+   * checks as place_cue(); returns null when the spot would have been accepted.
+   */
+  place_refusal(x, y) {
+    if (!this.ball_in_hand) return null;
+    const w = this.world;
+    const r = w.ball_radius;
+    if (!(r <= x && x <= w.width - r && r <= y && y <= w.height - r)) {
+      return "That spot is off the table.";
+    }
+    if (this.ball_in_hand_kitchen && x > this.head_string()) {
+      return "Break: the cue ball must go behind the head string (the shaded quarter).";
+    }
+    for (const b of w.balls) {
+      if (b.kind === "cue" || b.pocketed) continue;
+      if (Math.hypot(b.x - x, b.y - y) < 2 * r) {
+        return "There is a ball in the way — pick a clear spot.";
+      }
+    }
+    return null;
+  }
+
   place_cue(x, y) {
     if (!this.ball_in_hand) return false;
     const w = this.world;
     const r = w.ball_radius;
-    if (this.ball_in_hand_kitchen && x > w.width / 2.0) return false;
+    // The break is played out of the kitchen; the cue ball's centre may sit on
+    // the head string but never past it.
+    if (this.ball_in_hand_kitchen && x > this.head_string()) return false;
     if (!(r <= x && x <= w.width - r && r <= y && y <= w.height - r)) return false;
     for (const b of w.balls) {
       if (b.kind === "cue" || b.pocketed) continue;
@@ -126,7 +157,9 @@ class EightBallGame {
 
   auto_place_cue() {
     const w = this.world;
-    this.place_cue(w.width * 0.25, w.height / 2.0);
+    // Comfortably inside the kitchen, so the break never starts on the line
+    // itself and the ball is visibly behind it.
+    this.place_cue(w.width * 0.22, w.height / 2.0);
   }
 
   _evaluate() {
@@ -147,11 +180,16 @@ class EightBallGame {
     }
 
     if (this.ball_in_hand_kitchen) { // this shot was the break
-      const balls_to_rail = w.rail_hit.size;
-      if (pocketed.length === 0 && balls_to_rail < 4) {
+      // Standard break: either a ball drops, or four object balls reach a rail.
+      if (pocketed.length === 0 && w.rail_hit.size < 4) {
         fouls.push("CUSHION_HIT_MIN_ON_BREAK");
       }
       this.ball_in_hand_kitchen = false;
+    } else if (first !== null && pocketed.length === 0 && !w.rail_after_contact) {
+      // A legal stroke does one of two things after contact: pockets a ball, or
+      // drives one to a cushion. A stroke too soft for either is a foul and the
+      // table passes over — the standard answer to "I barely touched it".
+      fouls.push("NO_CUSHION_AFTER_CONTACT");
     }
 
     // premature 8-ball = loss
@@ -225,11 +263,11 @@ class EightBallGame {
       cue = new Ball(0, 0, r, MASS, 0, "cue");
       w.addBall(cue);
     }
-    let x = w.width * 0.25, y = w.height / 2.0;
+    let x = w.width * 0.22, y = w.height / 2.0;
     while (w.balls.some(b => b !== cue && !b.pocketed &&
       Math.hypot(b.x - x, b.y - y) < 2 * r)) {
       x += r;
-      if (x > w.width / 2.0) { x = w.width * 0.25; y += r; }
+      if (x > w.width / 2.0) { x = w.width * 0.22; y += r; }
     }
     cue.x = x; cue.y = y;
     cue.pocketed = false;

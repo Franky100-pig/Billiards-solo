@@ -164,6 +164,8 @@ class World {
     this.first_contact = null;     // ball number cue hit first
     this.pocketed_this_shot = [];  // ball numbers pocketed this shot
     this.rail_hit = new Set();     // ball numbers that touched a cushion
+    this.rail_after_contact = false; // did anything reach a rail after the cue
+                                     // ball first met an object ball?
     this.cushions = this._buildCushions(this.gap);
     // Contact events for the presentation layer (rings / rail sparks). The bot
     // simulates on clones, so this never leaks into a search.
@@ -297,10 +299,10 @@ class World {
       }
     }
     const e = this.restitution_cushion;
-    if (b.x < r) { b.x = r; if (b.vx < 0) { b.vx = -b.vx * e; this.rail_hit.add(b.number); } }
-    else if (b.x > W - r) { b.x = W - r; if (b.vx > 0) { b.vx = -b.vx * e; this.rail_hit.add(b.number); } }
-    if (b.y < r) { b.y = r; if (b.vy < 0) { b.vy = -b.vy * e; this.rail_hit.add(b.number); } }
-    else if (b.y > H - r) { b.y = H - r; if (b.vy > 0) { b.vy = -b.vy * e; this.rail_hit.add(b.number); } }
+    if (b.x < r) { b.x = r; if (b.vx < 0) { b.vx = -b.vx * e; this._touchedRail(b); } }
+    else if (b.x > W - r) { b.x = W - r; if (b.vx > 0) { b.vx = -b.vx * e; this._touchedRail(b); } }
+    if (b.y < r) { b.y = r; if (b.vy < 0) { b.vy = -b.vy * e; this._touchedRail(b); } }
+    else if (b.y > H - r) { b.y = H - r; if (b.vy > 0) { b.vy = -b.vy * e; this._touchedRail(b); } }
   }
 
   simulate(h = 1.0 / 240.0, max_steps = 6000) {
@@ -317,6 +319,7 @@ class World {
     this.first_contact = null;
     this.pocketed_this_shot = [];
     this.rail_hit = new Set();
+    this.rail_after_contact = false;
     this.fx.length = 0;
   }
 
@@ -405,6 +408,17 @@ class World {
     return false;
   }
 
+  /**
+   * One place to record that a ball reached a cushion. The rules need to know
+   * both *which* balls got there (the four-ball break rule) and whether it
+   * happened *after* the cue ball first met an object ball — that second bit is
+   * what separates a legal safety from a stroke too soft to reach anything.
+   */
+  _touchedRail(b) {
+    this.rail_hit.add(b.number);
+    if (this.first_contact !== null) this.rail_after_contact = true;
+  }
+
   _collideCushions(b) {
     const r = b.radius;
     for (const [px, py] of this.pockets) {
@@ -421,7 +435,7 @@ class World {
       const vn = b.vx * nx + b.vy * ny;
       if (vn >= 0.0) continue;
 
-      this.rail_hit.add(b.number);
+      this._touchedRail(b);
       const e = this.restitution_cushion;
       b.vx -= (1.0 + e) * vn * nx;
       b.vy -= (1.0 + e) * vn * ny;

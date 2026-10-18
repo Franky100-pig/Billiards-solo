@@ -113,6 +113,25 @@ class SnookerGame {
     return number;
   }
 
+  /** Why a placement was refused, so the UI can explain instead of ignoring. */
+  place_refusal(x, y) {
+    if (!this.ball_in_hand) return null;
+    const w = this.world;
+    const r = w.ball_radius;
+    const spots = snookerSpots(w.width, w.height);
+    if (!(r <= y && y <= w.height - r)) return "That spot is off the table.";
+    if (Math.hypot(x - spots.baulk_x, y - w.height / 2.0) > spots.d_radius) {
+      return "Snooker: the cue ball must be played from inside the D.";
+    }
+    for (const b of w.balls) {
+      if (b.kind === "cue" || b.pocketed) continue;
+      if (Math.hypot(b.x - x, b.y - y) < 2 * r) {
+        return "There is a ball in the way — pick a clear spot.";
+      }
+    }
+    return null;
+  }
+
   place_cue(x, y) {
     if (!this.ball_in_hand) return false;
     const w = this.world;
