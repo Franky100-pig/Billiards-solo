@@ -39,6 +39,26 @@ shaded and a click outside it is refused with an explanation:
 
 ![break placement behind the head string](docs/screenshots/break_line.png)
 
+### The balls roll; they do not slide
+
+A ball carries a real orientation, integrated from its angular velocity, and the number and stripe are
+painted onto that sphere — so what you see is the printing turning over the ball, not a flat sprite being
+dragged across the cloth. The same two balls, one half-turn apart in 30° steps:
+
+![two balls a half-turn apart, in 30 degree steps](docs/screenshots/rolling.png)
+
+Because the rotation comes from the *angular* velocity and not from the distance travelled, the animation
+says something true about the shot: a ball that is still skidding slides without turning, a draw shot keeps
+turning backwards while it is still moving forwards, and side spin turns the print flat instead of
+end-over-end.
+
+Every ball carries its number on **both poles** — as real balls do — so a parked ball is never more than a
+half turn from showing one, and it keeps whatever orientation it stopped in rather than snapping face-up.
+What that costs is honest: when the patch has tipped past the horizon you see colour instead of a number
+(about a fifth of resting object balls), and a numeral foreshortened past the point of legibility is
+dropped rather than drawn as a smudge that misreads as a different digit. Colour and stripe identify every
+ball in 8-ball on their own, so nothing is ambiguous.
+
 ### Controls
 - **Ball-in-hand** — click/tap a clear spot to place the cue ball. After a foul that is anywhere on the
   table; **on the break it must be behind the head string**, so the legal quarter of the table is shaded
@@ -220,6 +240,10 @@ it with the actual mechanics of a sphere on cloth:
   of being decoration, and `wz` bleeds off as the ball runs along the rail.
 - A ball is only parked when its **speed and its slip** are both small, so a stationary-looking ball with
   back-spin left still bites and rolls back.
+- The ball also carries a **unit quaternion** integrated from `(wx, wy, wz)` every step, so the picture is
+  driven by the same rotation the mechanics use. It is presentation state — the rules and the bot never read
+  it, and the bot's throwaway worlds switch the integration off (`clone()`), which is what keeps the search
+  as fast as it was: without that switch the extra quaternion work doubled the bot's think time.
 
 > **Modelling note (playability):** bloob's literal `hole.radius` (5 / 11) is smaller than the ball, so a
 > shot aimed at a pocket would miss. Capture radius is relaxed to **1.5× ball radius**. The damping model is
@@ -241,7 +265,7 @@ The JavaScript port surfaced three genuine bugs that also affected the Python bu
 
 ## Verification
 
-- **Physics & logic (Node, headless): 45/45** — the table settles; rolling advances exactly with travel; a
+- **Physics & logic (Node, headless): 46/46** — the table settles; rolling advances exactly with travel; a
   full 8-ball frame completes; **no ball ever leaves the table**; the bot's strokes stay inside the power
   envelope and average well below the cap; snooker reds decrement consistently; colours pot in ascending
   order. Plus the new mechanics: a back-spin stroke **draws back**, a top-spin stroke **follows through**, a
@@ -249,7 +273,7 @@ The JavaScript port surfaced three genuine bugs that also affected the Python bu
   coasting ball's speed follows `v₀·e^(−0.45 t)` to within a few per cent.
 - **Position play & escapes (Node, headless): 6/6** — a deliberately snookered cue finds a one-rail kick that
   contacts the ball on, stays on the table, and the 8-ball / snooker frames still finish.
-- **UI wiring (headless DOM/Canvas): 71/71** — menu → start → place → aim → pull → strike → resolve → bot
+- **UI wiring (headless DOM/Canvas): 79/79** — menu → start → place → aim → pull → strike → resolve → bot
   turn, for both modes, plus the game-over overlay, a monotonic power curve from a soft tap to a full stroke,
   the spin dial setting the strike point, and ball-in-hand on both tables. The aim/power split has its own
   cases: pointing right aims right (not left), pointing up aims up, jitter sitting on the ball is ignored,
@@ -262,12 +286,20 @@ The JavaScript port surfaced three genuine bugs that also affected the Python bu
   shot fired from the centre and after five ↓ differ *only* in spin — the centre ball leaves with no rolling
   spin at all, the down-arrow ball leaves with a real backspin, and both settle without anything leaving the
   table.
-- **Rules (in the 45 above)** — a spot past the head string is refused on the break and the same click
+- **Rules (in the 46 above)** — a spot past the head string is refused on the break and the same click
   inside the kitchen is accepted, with the centre allowed to sit exactly on the line and one unit past it
   not; ball-in-hand is unrestricted once the break is over; an overlapping ball is refused with a reason. On
   an empty table, a stroke that touches a ball and dies without reaching a cushion is a foul
   (`NO_CUSHION_AFTER_CONTACT`) with ball in hand to the opponent, the same stroke at pace is legal, and a
   ball potted with no rail contact at all is still legal.
+- **Rolling print (same suite)** — a face-up ball prints its number in the middle of the ball; rolling it
+  moves the number toward the leading edge (not backwards); a number at the horizon is not drawn at all; a
+  steeply tipped number is still drawn and is still a legible shape rather than a sliver; a number past the
+  sliver is dropped instead of garbled; and the far pole prints its own number, upright and unmirrored.
+  Backed by an offline check of the cap outline against the analytic membership test
+  `p·a₂ + √(1−|p|²)·a_z ≥ c` over 70 965 probe points across every orientation: **0.05 % mismatch**, all of
+  them on the boundary itself — and by a sweep of the same ball at every angle, which is where the
+  foreshortening floor came from.
 - **Pygame build (same rules)** — the identical scenarios run against `src/`: head string, refusal message,
   and both the soft and the hard stroke, plus a headless `SDL_VIDEODRIVER=dummy` render of the break frame.
 - Screenshots above are real renders captured with headless Chrome.
@@ -350,6 +382,15 @@ bot 除 ghost-ball 进球搜索外，新增**走位评估**（打完球后母球
 体——越界会被投影回圆周上，所以一直按住 ↑ 会稳稳停在 12 点方向，而不是乱跳。双击旋钮或按 **S** 回中；
 **每打完一杆都会自动回到正中心**，这杆调的塞不会被带到下一杆去。球杆画出来时也会偏离球心，和击球点
 一致。击球点偏移 `h` 直接决定角速度 `w = 2.5·h·v/r`：正中心是定杆，往下四格就是真低杆。
+
+**滚动**：球不是贴图在平移，而是带着真实朝向在转——母球/目标球都维护一个单位四元数，每一步由
+`(wx, wy, wz)` 积分，号码和条带是"印在球面上"再投影出来的。所以号码会沿着球面翻过去、在边缘被压扁、
+翻到背面就看不见；条纹也会跟着转，而不是永远横在球中间。因为转向来自**角速度**而不是走了多远，
+动画本身是有信息的：还在打滑的球只平移不转，低杆球一边往前一边**倒着转**，侧塞则是绕竖轴平转。
+停下来的球保持它停住时的朝向——每颗球两面都印号（和真球一样），所以最多半个身子转过去就能再看到号码，
+而不是靠"停球时把角度归零"这种作弊。代价是诚实的：贴片翻过地平线时就只剩颜色（约五分之一的静止目标球），
+而压扁到已经读不出来的号码宁可不画——否则 8 会被看成 0、12 会被看成 (2，那是更糟的错。
+八球里颜色 + 花色本来就足以认出每一颗球。
 
 **进袋**：进袋不再"一帧消失"。球会滑进袋口最后几个单位、缩小、淡出，并在一道裁剪到袋口的袋沿阴影下
 消失，同时袋口泛起涟漪、附近台呢变暗；碰撞点还会溅出一圈短促的火花点，能看清是哪两颗球撞了、多重。
