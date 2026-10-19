@@ -36,6 +36,22 @@ const MAX_DRAG = 205.0;
 // Pocket drop animation (presentation only; the ball is already pocketed).
 const SINK_TIME = 0.42;
 
+// How the ball's printing is laid out on the sphere, as cosines of the polar
+// angle. A striped ball is white at both ends and coloured in between, so the
+// white cap covers everything poleward of BAND_COS; a solid ball carries a
+// small white number patch, i.e. a cap of PATCH_COS. Both are real caps, not
+// screen-space ellipses, so they wrap over the horizon as the ball turns.
+const BAND_COS = 0.62;
+const PATCH_COS = 0.88;
+
+// How far a numeral may be tipped before it is dropped, and how hard its
+// foreshortening is clamped. Measured against a rendered sweep of the same ball
+// at every angle: past ~1:1.7 the glyph misreads ("8" becomes "0"), and past
+// facing 0.30 the patch is a sliver too thin to carry a glyph at all.
+const NUMERAL_MIN_FACING = 0.30;
+const NUMERAL_FADE = 0.20;
+const NUMERAL_MIN_SQUASH = 0.60;
+
 // Spin dial: the tip contact point on the cue ball. Screen offsets in units of
 // the ball radius; +x = right english, +y = top spin.
 // Dead centre is a stun; the dial returns here after every stroke.
@@ -845,21 +861,11 @@ class App {
     const info = ballColor(b, this.snooker);
     const fill = rgb(info.fill);
 
-    // As a ball dies, let its pattern settle face-up. The physics snaps the
-    // roll angle once the ball is parked; this eases the last few degrees
-    // while it is still creeping so the number fades back in smoothly.
-    if (b.speed() < 45 && b.angle !== 0) {
-      const rem = ((b.angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
-      const target = rem > Math.PI ? Math.PI * 2 : 0;
-      b.angle += (target - rem) * 0.18;
-      if (Math.abs(target - rem) < 1e-3) b.angle = target;
-    }
-
     // --- motion streak: a tapered comet tail behind the ball ------------
     const sp = b.speed();
     if (sp > 90) {
       const len = Math.min(r * 4.6, sp * 0.040) * (r / 11 + 0.55);
-      const ux = b.dirx, uy = b.diry;
+      const ux = b.vx / sp, uy = b.vy / sp;
       const pxx = -uy, pyy = ux;                 // perpendicular
       const a = Math.min(0.32, (sp - 90) / 1500);
       // start the tail at the ball's far edge so it never covers the ball
@@ -898,16 +904,21 @@ class App {
       ctx.beginPath(); ctx.arc(sx, sy, r, 0, Math.PI * 2);
       ctx.fillStyle = g; ctx.fill();
 
-      // rolling read: a fat, faint sheen that sweeps around as it turns
-      const ca = Math.cos(b.angle), sa = Math.sin(b.angle);
+      // rolling read: a fat, faint sheen that sweeps around as it turns. The
+      // material point that started at the pole is a real point on the ball,
+      // so the sheen tracks the actual rotation instead of a fake phase.
+      const up = _qRotate(b.q, [0.0, 0.0, 1.0]);
+      const ca = up[2];
       if (ca > 0.05) {
         ctx.save();
         ctx.beginPath(); ctx.arc(sx, sy, r * 0.995, 0, Math.PI * 2); ctx.clip();
         ctx.globalAlpha = 0.09 * ca;
         ctx.fillStyle = "#ffffff";
+        const sa = Math.hypot(up[0], up[1]);
         ctx.beginPath();
-        ctx.ellipse(sx + b.dirx * sa * r * 0.62, sy + b.diry * sa * r * 0.62,
-          r * 0.46, r * 0.30, Math.atan2(b.diry, b.dirx), 0, Math.PI * 2);
+        ctx.ellipse(sx + up[0] * r * 0.62, sy + up[1] * r * 0.62,
+          r * 0.46, r * 0.30, Math.atan2(up[1], up[0]), 0, Math.PI * 2);
+        void sa;
         ctx.fill();
         ctx.restore();
       }
@@ -926,18 +937,38 @@ class App {
       return;
     }
 
-    // base
+    // --- a printed sphere, not a sprite ----------------------------------
+    // The ball's printing is a fixed pattern on the surface, so it is painted
+    // from the ball's real orientation: `axis` is the pole the pattern is
+    // built around, and e1/e2 are the material axes the numeral is printed
+    // along. Every visible feature is the projection of a circle on the
+    // sphere, which is why the stripe wraps, the number squashes, and both of
+    // them disappear over the horizon exactly when they should.
+    const axis = _qRotate(b.q, [0.0, 0.0, 1.0]);
+    const e1 = _qRotate(b.q, [1.0, 0.0, 0.0]);
+    const e2 = _qRotate(b.q, [0.0, 1.0, 0.0]);
+
+    // base: the whole ball is the ball's colour, then the white ends are cut
+    // out of it. A striped ball is a white ball with a coloured band, which is
+    // the same thing as a coloured ball with two white pole caps.
     ctx.beginPath(); ctx.arc(sx, sy, r, 0, Math.PI * 2);
-    ctx.fillStyle = info.stripe ? "#ececec" : fill;
+    ctx.fillStyle = fill;
     ctx.fill();
 
-    // stripe band (white ball with a coloured equator band)
+    // the far pole needs its OWN tangent frame: a real ball has the number
+    // printed twice, each upright for the side you are looking at, which in
+    // material coordinates means the second print is mirrored. Using the
+    // right-handed frame of that pole does exactly that — without it the far
+    // number comes out mirror-imaged ("Ɛ" for a 3).
+    const axis2 = [-axis[0], -axis[1], -axis[2]];
+    const e1b = [-e1[0], -e1[1], -e1[2]];
+
     if (info.stripe) {
-      ctx.save();
-      ctx.beginPath(); ctx.arc(sx, sy, r, 0, Math.PI * 2); ctx.clip();
-      ctx.fillStyle = fill;
-      ctx.fillRect(sx - r, sy - r * 0.60, 2 * r, r * 1.20);
-      ctx.restore();
+      this._ballCap(sx, sy, r, axis, e1, e2, BAND_COS, "#ececec");
+      this._ballCap(sx, sy, r, axis2, e1b, e2, BAND_COS, "#ececec");
+    } else {
+      this._ballCap(sx, sy, r, axis, e1, e2, PATCH_COS, "#f4f4f4");
+      this._ballCap(sx, sy, r, axis2, e1b, e2, PATCH_COS, "#f4f4f4");
     }
 
     // highlight + shading
@@ -953,35 +984,160 @@ class App {
     ctx.beginPath(); ctx.arc(sx, sy, r, 0, Math.PI * 2);
     ctx.strokeStyle = "rgba(0,0,0,.55)"; ctx.lineWidth = 1; ctx.stroke();
 
-    // --- number patch (8-ball): rides the sphere as it rolls ------------
-    // The patch is painted at the ball's pole. Rolling tips that pole forward
-    // by `angle`, so on screen it slides along the direction of travel by
-    // r*sin(angle), squashes by cos(angle), and vanishes once it has tipped
-    // past the horizon on the far side.
-    if (!this.snooker && b.kind !== "cue") {
-      const ca = Math.cos(b.angle), sa = Math.sin(b.angle);
-      if (ca > 0.06) {
-        const dr = r * 0.46;
-        const ox = sx + b.dirx * sa * r * 0.90;
-        const oy = sy + b.diry * sa * r * 0.90;
-        const rot = Math.atan2(b.diry, b.dirx);
-        ctx.save();
-        ctx.beginPath(); ctx.arc(sx, sy, r * 0.99, 0, Math.PI * 2); ctx.clip();
-        ctx.beginPath();
-        ctx.ellipse(ox, oy, dr * ca, dr, rot, 0, Math.PI * 2);
-        ctx.fillStyle = "#f4f4f4"; ctx.fill();
-        ctx.strokeStyle = "rgba(0,0,0,.20)"; ctx.lineWidth = 1; ctx.stroke();
-        if (ca > 0.34) {
-          ctx.fillStyle = "#141414";
-          ctx.font = `700 ${Math.max(6, r * 0.78 * Math.sqrt(ca))}px `
-            + `-apple-system, system-ui, sans-serif`;
-          ctx.textAlign = "center"; ctx.textBaseline = "middle";
-          ctx.fillText(String(b.number), ox, oy + 0.5);
-          ctx.textBaseline = "alphabetic";
-        }
-        ctx.restore();
+
+    // the numerals ride on top of the shading so they stay readable. A solid
+    // ball's white circle is smaller than a striped ball's white end, so its
+    // digit is set a little larger relative to that circle: on a 26 px ball the
+    // literal size would be about five pixels and unreadable.
+    if (b.kind !== "cue" && b.number) {
+      const cosR = info.stripe ? BAND_COS : PATCH_COS;
+      // two-digit numbers are half again as wide, so they are set smaller to
+      // stay inside the white patch instead of spilling onto the colour
+      const k = (info.stripe ? 1.42 : 1.75) * (b.number >= 10 ? 0.76 : 1.0);
+      this._ballNumber(sx, sy, r, axis, e1, e2, cosR, b.number, k);
+      this._ballNumber(sx, sy, r, axis2, e1b, e2, cosR, b.number, k);
+    }
+  }
+
+  /**
+   * Paint one circular patch of the ball's printed surface, given the patch's
+   * outward normal `axis`, its angular radius (as a cosine) and the material
+   * axes e1/e2 that span its rim.
+   *
+   * The rim is a real 3D circle, so its outline on screen is the projection of
+   * that circle — and because the camera only sees the near hemisphere, any
+   * part of the rim that has tipped behind the ball is projected onto the
+   * silhouette, which is exactly where the patch visually ends. Clipping an
+   * ellipse instead would make the patch slide off the edge of a flat disc.
+   */
+  _ballCap(sx, sy, r, axis, e1, e2, cosR, colour) {
+    const ctx = this.ctx;
+    const sinR = Math.sqrt(Math.max(0.0, 1.0 - cosR * cosR));
+    const axy = Math.hypot(axis[0], axis[1]);
+    // nothing of this cap reaches the near hemisphere
+    if (cosR * axis[2] + sinR * axy <= 0.0) return;
+
+    const TAU = Math.PI * 2;
+    const N = 48;
+    // One pass over the rim: the same samples are needed three times (to find
+    // where it goes behind the ball, to walk the visible arc, and to place the
+    // limb), so they are computed once. Sixteen balls at 60 Hz is otherwise a
+    // few million trig calls a second for nothing.
+    const rx = new Array(N), ry = new Array(N), rz = new Array(N);
+    for (let i = 0; i < N; i++) {
+      const t = (i / N) * TAU;
+      const ct = Math.cos(t) * sinR, st = Math.sin(t) * sinR;
+      rx[i] = cosR * axis[0] + ct * e1[0] + st * e2[0];
+      ry[i] = cosR * axis[1] + ct * e1[1] + st * e2[1];
+      rz[i] = cosR * axis[2] + ct * e1[2] + st * e2[2];
+    }
+
+    const pts = [];
+    let hidden = -1;
+    for (let i = 0; i < N; i++) {
+      if (rz[i] < 0.0) { hidden = i; break; }
+    }
+    if (hidden < 0) {
+      // the whole rim is in view, so the cap is just the rim's own outline
+      for (let i = 0; i < N; i++) pts.push([rx[i], ry[i]]);
+    } else {
+      // the visible rim is one contiguous arc: walk from the first visible
+      // point until the rim dips behind the ball again
+      let start = -1;
+      for (let k = 1; k <= N; k++) {
+        const i = (hidden + k) % N;
+        if (rz[i] >= 0.0) { start = i; break; }
+      }
+      if (start < 0) return;                       // wholly behind the ball
+      for (let k = 0; k < N; k++) {
+        const i = (start + k) % N;
+        if (rz[i] < 0.0) break;
+        pts.push([rx[i], ry[i]]);
+      }
+      // close the region along the silhouette, the way round that passes the
+      // side the cap is on (the other way would enclose the whole ball)
+      const first = pts[0], last = pts[pts.length - 1];
+      const a0 = Math.atan2(first[1], first[0]);
+      const a1 = Math.atan2(last[1], last[0]);
+      const ap = Math.atan2(axis[1], axis[0]);
+      const norm = (x) => ((x % TAU) + TAU) % TAU;
+      let sweep = norm(a0 - a1);
+      const mid = norm(a1 + sweep * 0.5);
+      const apart = Math.abs(((norm(ap - mid) + Math.PI) % TAU) - Math.PI);
+      if (apart > Math.PI / 2) sweep -= TAU;         // sweep the other way
+      const steps = Math.max(4, Math.round(Math.abs(sweep) / TAU * N));
+      for (let i = 1; i < steps; i++) {
+        const ang = a1 + sweep * (i / steps);
+        pts.push([Math.cos(ang), Math.sin(ang)]);
       }
     }
+
+    ctx.save();
+    ctx.beginPath(); ctx.arc(sx, sy, r, 0, TAU); ctx.clip();
+    ctx.beginPath();
+    for (let i = 0; i < pts.length; i++) {
+      const px = sx + pts[i][0] * r, py = sy + pts[i][1] * r;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fillStyle = colour;
+    ctx.fill();
+    ctx.restore();
+  }
+
+  /**
+   * Print the numeral on a pole patch, in the patch's own tangent frame, so it
+   * foreshortens and turns with the surface instead of staying screen-aligned;
+   * it fades out as the patch goes edge-on, where a real number would be
+   * invisible too.
+   *
+   * Two concessions to the size of the ball, both measured rather than guessed:
+   *
+   *  - Below NUMERAL_MIN_FACING the print is a sliver a pixel or two wide, and a
+   *    glyph foreshortened that far stops being a digit and starts being a
+   *    smudge that misreads as a different one ("8" as "0", "12" as "(2"). No
+   *    numeral is better than a wrong one, so it is dropped. Colour and stripe
+   *    already identify every ball uniquely.
+   *  - Foreshortening itself is clamped at NUMERAL_MIN_SQUASH. True projection
+   *    is right for the patch -- it still wraps and disappears on cue -- but a
+   *    letterform squeezed past ~1:1.7 is no longer legible, and this is the
+   *    range where the ball is still perfectly visible.
+   */
+  _ballNumber(sx, sy, r, axis, e1, e2, cosR, number, k = 1.0) {
+    const ctx = this.ctx;
+    const sinR = Math.sqrt(Math.max(0.0, 1.0 - cosR * cosR));
+    const facing = axis[2];
+    if (facing < NUMERAL_MIN_FACING) return;
+    const alpha = Math.min(1.0, (facing - NUMERAL_MIN_FACING) / NUMERAL_FADE);
+    const cx = sx + cosR * axis[0] * r;
+    const cy = sy + cosR * axis[1] * r;
+
+    // Decompose the tangent frame into rotation + the two scale factors it
+    // applies, so the shorter one can be lifted without introducing shear:
+    // scaling a basis vector along its own direction is still an orthonormal
+    // frame, just a less squashed one.
+    const ux = e1[0], uy = e1[1], vx = e2[0], vy = e2[1];
+    const lu = Math.hypot(ux, uy) || 1.0;
+    const lv = Math.hypot(vx, vy) || 1.0;
+    const hi = Math.max(lu, lv);
+    let su = lu, sv = lv;
+    if (Math.min(lu, lv) < hi * NUMERAL_MIN_SQUASH) {
+      if (lu <= lv) su = hi * NUMERAL_MIN_SQUASH;
+      else sv = hi * NUMERAL_MIN_SQUASH;
+    }
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.transform(r * ux / lu * su, r * uy / lu * su,
+                  r * vx / lv * sv, r * vy / lv * sv, cx, cy);
+    ctx.fillStyle = "#141414";
+    ctx.font = `700 ${0.95 * sinR * k}px -apple-system, system-ui, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    // the glyph is drawn in ball radii because the transform scales it
+    ctx.fillText(String(number), 0, 0);
+    ctx.restore();
   }
 
   _renderBalls() {
