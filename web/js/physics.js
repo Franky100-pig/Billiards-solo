@@ -91,6 +91,52 @@ function _pointSegDist(px, py, ax, ay, bx, by) {
   return Math.hypot(px - cx, py - cy);
 }
 
+// --- quaternions (orientation only) --------------------------------------
+// The painted surface is a property of the ball, not of the sprite: a ball
+// that rolls must carry its stripes and numbers round with it. A quaternion
+// integrates the real angular velocity, so draw, follow and side spin rotate
+// the ball exactly as they rotate it on the cloth — and a ball that is
+// travelling while still skidding visibly does NOT turn, which is what tells
+// the eye it is skidding rather than rolling.
+function _qMul(a, b) {
+  return [
+    a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
+    a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
+    a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1],
+    a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0],
+  ];
+}
+
+function _qNormalise(q) {
+  const n = Math.hypot(q[0], q[1], q[2], q[3]) || 1.0;
+  return [q[0] / n, q[1] / n, q[2] / n, q[3] / n];
+}
+
+/** Rotate a 3-vector by a unit quaternion. */
+function _qRotate(q, v) {
+  const w = q[0], x = q[1], y = q[2], z = q[3];
+  const tx = 2.0 * (y * v[2] - z * v[1]);
+  const ty = 2.0 * (z * v[0] - x * v[2]);
+  const tz = 2.0 * (x * v[1] - y * v[0]);
+  return [
+    v[0] + w * tx + (y * tz - z * ty),
+    v[1] + w * ty + (z * tx - x * tz),
+    v[2] + w * tz + (x * ty - y * tx),
+  ];
+}
+
+/** q += h/2 · (0, ω) ⊗ q — one step of the world-frame angular velocity. */
+function _qIntegrate(q, wx, wy, wz, h) {
+  const k = 0.5 * h;
+  const w = q[0], x = q[1], y = q[2], z = q[3];
+  return _qNormalise([
+    w + k * (-(wx * x + wy * y + wz * z)),
+    x + k * (w * wx + (wy * z - wz * y)),
+    y + k * (w * wy + (wz * x - wx * z)),
+    z + k * (w * wz + (wx * y - wy * x)),
+  ]);
+}
+
 // --- Ball ----------------------------------------------------------------
 class Ball {
   constructor(x, y, radius, mass = MASS, number = 0, kind = "object") {
@@ -116,13 +162,11 @@ class Ball {
     this.wy = 0.0;
     this.wz = 0.0;
 
-    // Presentation-only state for the rolling animation. `angle` is the angle
-    // the ball has rolled through (radians, v*h/r accumulated) and (dirx,diry)
-    // is the last direction it travelled in, so the renderer can slide the
-    // painted pattern over the sphere. Never read by the rules or the bot.
-    this.angle = 0.0;
-    this.dirx = 1.0;
-    this.diry = 0.0;
+    // Orientation as a unit quaternion [w, x, y, z]. Rolling is a real rotation
+    // of the painted surface, so the stripe and the number travel with the ball
+    // instead of sliding as a flat sprite. Presentation only: the rules and the
+    // bot never read it, so a change here can never change the physics.
+    this.q = [1.0, 0.0, 0.0, 0.0];
   }
   speed() {
     return Math.hypot(this.vx, this.vy);
@@ -135,7 +179,7 @@ class Ball {
     const b = new Ball(this.x, this.y, this.radius, this.mass, this.number, this.kind);
     b.vx = this.vx; b.vy = this.vy; b.pocketed = this.pocketed;
     b.wx = this.wx; b.wy = this.wy; b.wz = this.wz;
-    b.angle = this.angle; b.dirx = this.dirx; b.diry = this.diry;
+    b.q = this.q.slice();
     return b;
   }
 }
@@ -167,6 +211,9 @@ class World {
     this.rail_after_contact = false; // did anything reach a rail after the cue
                                      // ball first met an object ball?
     this.cushions = this._buildCushions(this.gap);
+    // Does anything need to know how the ball is turned? Only the renderer
+    // does. The bot's scratch worlds switch it off (see clone()).
+    this.track_orientation = true;
     // Contact events for the presentation layer (rings / rail sparks). The bot
     // simulates on clones, so this never leaks into a search.
     this.fx = [];
@@ -216,12 +263,12 @@ class World {
       b.y += b.vy * h;
 
       const sp = Math.hypot(b.vx, b.vy);
-      if (sp > 1e-6) {
-        // rolling without slipping: d(theta) = ds / r
-        b.angle += (sp * h) / b.radius;
-        if (b.angle > TWO_PI) b.angle -= TWO_PI;
-        b.dirx = b.vx / sp;
-        b.diry = b.vy / sp;
+      // Turn the ball by however much it actually spun this step. Taking it
+      // from the angular velocity (not from the distance travelled) is what
+      // makes a skidding ball slide without turning, and a ball with draw
+      // spin backwards while it is still going forwards.
+      if (this.track_orientation && (b.wx !== 0.0 || b.wy !== 0.0 || b.wz !== 0.0)) {
+        b.q = _qIntegrate(b.q, b.wx, b.wy, b.wz, h);
       }
       // A ball only rests when it is neither travelling NOR spinning against
       // the cloth: killing a slow ball that still carries draw spin would
@@ -230,10 +277,9 @@ class World {
       if (sp < this.sleep_speed && slip < this.sleep_speed * 3.0) {
         b.vx = 0.0; b.vy = 0.0;
         b.wx = 0.0; b.wy = 0.0; b.wz = 0.0;
-        // Settle the painted pattern face-up. A ball rolls through arbitrary
-        // angles, so without this a ball can come to rest with its number
-        // pointing at the floor and stay unreadable for the rest of the frame.
-        b.angle = Math.round(b.angle / TWO_PI) * TWO_PI;
+        // No "settle face-up" snap: a real ball stops wherever its printing
+        // happens to be, and the renderer puts a number on BOTH poles so a
+        // parked ball is still readable without cheating its orientation.
       }
     }
 
@@ -499,6 +545,11 @@ class World {
       this.restitution_ball, this.restitution_cushion,
       this.damping, this.sleep_speed);
     w.balls = this.balls.map(b => b.clone());
+    // A clone is the bot's scratch world: it is simulated thousands of times
+    // per shot and never drawn, so tracking the printed surface there would
+    // double the search cost for nothing. Set it back to true if a clone ever
+    // needs to be rendered.
+    w.track_orientation = false;
     return w;
   }
 
