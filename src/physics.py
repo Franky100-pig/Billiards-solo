@@ -49,11 +49,92 @@ SNOOKER_BLACK_X = 0.9092
 SNOOKER_PINK_X = 0.75
 
 MASS = 3.0
-RESTITUTION_BALL = 0.9
-RESTITUTION_CUSHION = 0.75
+RADIUS_RATIO = 2.0 / 5.0  # I = 2/5 m r^2 for a solid sphere
+INV_RATIO = 1.0 / RADIUS_RATIO
+RESTITUTION_BALL = 0.93
+RESTITUTION_CUSHION = 0.72
 DAMPING = 0.45            # per-second exponential linear decay (modeled; see docstring)
-SLEEP_SPEED = 5.0         # u/s; below this a ball is parked
+SLEEP_SPEED = 4.5         # u/s; below this a ball is parked
 SOLVER_ITER = 20          # bloob uses 20; we resolve overlaps per-substep (cheap at our scale)
+
+# Friction coefficients. Ball-ball friction is small (a pool ball slaps rather
+# than grips) but it is what produces throw on a cut; the cushion rubber grips
+# more, which is how side spin kicks off a rail.
+BALL_FRICTION = 0.055
+CUSHION_FRICTION = 0.17
+
+# Cloth friction while the ball slides on its contact patch. Big enough that a
+# draw shot visibly comes back, small enough that a rolling ball is unaffected.
+SLIP_DECEL = 470.0        # u/s^2
+SLIP_SNAP = 1.6           # below this the ball is treated as rolling
+SPIN_DAMPING = 0.75       # per-second decay of side spin
+# The tip can only contact the ball within ~half a radius of centre without
+# miscueing, and 0.4 R is exactly natural roll (w = v/r).
+SPIN_ZONE = 0.55
+SPIN_DEFAULT = 0.5        # dial position the bot strokes with
+
+
+# ---------------------------------------------------------------------------
+# Orientation quaternions. The renderer needs to know which way the printed
+# surface is facing; the mechanics need it too, because the roll you see has to
+# come from the angular velocity rather than from the distance travelled.
+# Stored as (w, x, y, z).
+# ---------------------------------------------------------------------------
+def q_mul(a: Tuple[float, float, float, float],
+          b: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
+    aw, ax, ay, az = a
+    bw, bx, by, bz = b
+    return (aw * bw - ax * bx - ay * by - az * bz,
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw)
+
+
+def q_normalise(q: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
+    n = math.sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]) or 1.0
+    return (q[0] / n, q[1] / n, q[2] / n, q[3] / n)
+
+
+def q_rotate(q: Tuple[float, float, float, float],
+             v: Tuple[float, float, float]) -> Tuple[float, float, float]:
+    """Rotate vector v by quaternion q (v' = q v q*)."""
+    w, x, y, z = q
+    vx, vy, vz = v
+    tx = 2.0 * (y * vz - z * vy)
+    ty = 2.0 * (z * vx - x * vz)
+    tz = 2.0 * (x * vy - y * vx)
+    return (vx + w * tx + (y * tz - z * ty),
+            vy + w * ty + (z * tx - x * tz),
+            vz + w * tz + (x * ty - y * tx))
+
+
+def q_integrate(q: Tuple[float, float, float, float],
+                wx: float, wy: float, wz: float,
+                h: float) -> Tuple[float, float, float, float]:
+    """Advance orientation by world-frame angular velocity (wx, wy, wz) over h."""
+    w, x, y, z = q
+    k = 0.5 * h
+    return q_normalise((
+        w + k * (-(wx * x + wy * y + wz * z)),
+        x + k * (w * wx + (wy * z - wz * y)),
+        y + k * (w * wy + (wz * x - wx * z)),
+        z + k * (w * wz + (wx * y - wy * x)),
+    ))
+
+
+def rack_orientation(n: int) -> Tuple[float, float, float, float]:
+    """A deterministic orientation for ball `n` as it comes out of the rack.
+
+    It makes no difference to the mechanics, but it makes a visible one: a rack
+    where every ball starts at the same orientation shows every stripe's white
+    pole to the camera, so seven of the balls look like spare cue balls. This
+    spreads them from the ball number, which keeps the rack reproducible.
+    """
+    ax, ay, az = 0.9 * n, 1.7 * n, 2.3 * n
+    qx = (math.cos(ax / 2.0), math.sin(ax / 2.0), 0.0, 0.0)
+    qy = (math.cos(ay / 2.0), 0.0, math.sin(ay / 2.0), 0.0)
+    qz = (math.cos(az / 2.0), 0.0, 0.0, math.sin(az / 2.0))
+    return q_normalise(q_mul(q_mul(qz, qy), qx))
 
 
 def _closest_point_on_segment(px: float, py: float,
@@ -78,8 +159,8 @@ def _point_seg_dist(px: float, py: float,
 
 
 class Ball:
-    __slots__ = ("x", "y", "px", "py", "vx", "vy", "radius", "mass",
-                 "pocketed", "number", "kind")
+    __slots__ = ("x", "y", "px", "py", "vx", "vy", "wx", "wy", "wz", "q",
+                 "radius", "mass", "pocketed", "number", "kind")
 
     def __init__(self, x: float, y: float, radius: float, mass: float = MASS,
                  number: int = 0, kind: str = "object"):
@@ -89,6 +170,14 @@ class Ball:
         self.py = y
         self.vx = 0.0
         self.vy = 0.0
+        # Angular velocity, world frame: (wx, wy) is the rolling spin seen as a
+        # rotation about the x/y axes, wz is side spin about the vertical.
+        self.wx = 0.0
+        self.wy = 0.0
+        self.wz = 0.0
+        # Orientation, presentation-only in effect but kept on the ball so the
+        # renderer draws the surface the mechanics actually turned.
+        self.q: Tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
         self.radius = radius
         self.mass = mass
         self.pocketed = False
@@ -98,10 +187,17 @@ class Ball:
     def speed(self) -> float:
         return math.hypot(self.vx, self.vy)
 
+    def slip(self) -> float:
+        """Speed of the contact patch relative to the cloth."""
+        return math.hypot(self.vx - self.radius * self.wy,
+                          self.vy + self.radius * self.wx)
+
     def clone(self) -> "Ball":
         b = Ball(self.x, self.y, self.radius, self.mass,
                  self.number, self.kind)
         b.vx, b.vy = self.vx, self.vy
+        b.wx, b.wy, b.wz = self.wx, self.wy, self.wz
+        b.q = self.q
         b.pocketed = self.pocketed
         return b
 
@@ -132,6 +228,11 @@ class World:
         self.damping = damping
         self.sleep_speed = sleep_speed
         self.balls: List[Ball] = []
+        # Track the printed surface only in worlds that get drawn. The bot
+        # simulates thousands of steps on scratch worlds it never renders, and
+        # integrating a quaternion there is pure cost (it doubled think time in
+        # the web build), so clone() switches it off.
+        self.track_orientation = True
         # shot event tracking (reset by begin_shot)
         self.first_contact: Optional[int] = None      # ball number cue hit first
         self.pocketed_this_shot: List[int] = []        # ball numbers pocketed this shot
@@ -168,19 +269,37 @@ class World:
     # -- simulation --------------------------------------------------------
     def advance(self, h: float) -> None:
         """One fixed substep of duration h (seconds)."""
-        # 1) integrate + exponential damping + sleep
+        # 1) cloth friction, then damping, integrate, sleep
         decay = math.exp(-self.damping * h)
+        spin_decay = math.exp(-SPIN_DAMPING * h)
         for b in self.balls:
             if b.pocketed:
                 continue
+            self._cloth_friction(b, h)
+            b.vx *= decay
+            b.vy *= decay
+            b.wz *= spin_decay
             b.px, b.py = b.x, b.y
             b.x += b.vx * h
             b.y += b.vy * h
-            b.vx *= decay
-            b.vy *= decay
-            if b.speed() < self.sleep_speed:
+
+            # Turn the ball by however much it actually spun this step. Taking
+            # the rotation from the angular velocity, and not from the distance
+            # travelled, is what makes a skidding ball slide without turning
+            # and a draw shot rotate backwards while it is still going forward.
+            if self.track_orientation and (b.wx or b.wy or b.wz):
+                b.q = q_integrate(b.q, b.wx, b.wy, b.wz, h)
+
+            # A ball only rests when it is neither travelling nor spinning
+            # against the cloth: killing a slow ball that still carries draw
+            # spin would silently eat the shot, and the cue ball would never
+            # come back.
+            if b.speed() < self.sleep_speed and b.slip() < self.sleep_speed * 3.0:
                 b.vx = 0.0
                 b.vy = 0.0
+                b.wx = 0.0
+                b.wy = 0.0
+                b.wz = 0.0
 
         # 2) ball-ball collisions (resolve a few times for stability)
         for _ in range(max(1, SOLVER_ITER // 10)):
@@ -204,6 +323,41 @@ class World:
                 continue
             self._contain_ball(b)
 
+    def _cloth_friction(self, b: Ball, h: float) -> None:
+        """Coulomb friction between the ball and the cloth, at the contact patch.
+
+        For a sphere the slip decays 3.5x faster than the ball decelerates
+        (1 + 5/2 from the moment of inertia), so a struck ball reaches pure
+        rolling in a fraction of a second -- the little "skid then roll" a real
+        ball does, and the reason draw and follow exist at all. Because the spin
+        is a real angular velocity, a ball struck below centre keeps turning
+        backwards while it is still travelling forwards, and that is exactly
+        what drags it back.
+        """
+        R = b.radius
+        ux = b.vx - R * b.wy
+        uy = b.vy + R * b.wx
+        us = math.hypot(ux, uy)
+        if us < SLIP_SNAP:
+            # pure rolling: snap the spin to the velocity so nothing buzzes
+            sp = b.speed()
+            if sp > 1e-6:
+                b.wx = -(b.vy / R)
+                b.wy = (b.vx / R)
+            else:
+                b.wx = 0.0
+                b.wy = 0.0
+            return
+        # never overshoot the remaining slip inside one substep
+        dec = min(SLIP_DECEL * h, us / (1.0 + INV_RATIO))
+        f = dec / us
+        dvx = -ux * f
+        dvy = -uy * f
+        b.vx += dvx
+        b.vy += dvy
+        b.wx += (INV_RATIO * dvy) / R
+        b.wy -= (INV_RATIO * dvx) / R
+
     def _contain_ball(self, b: Ball) -> None:
         r = b.radius
         W, H = self.width, self.height
@@ -211,10 +365,7 @@ class World:
             return
         for px, py in self.pockets:
             if math.hypot(b.x - px, b.y - py) < self.capture_radius + self.gap + r:
-                b.pocketed = True
-                b.vx = 0.0
-                b.vy = 0.0
-                self.pocketed_this_shot.append(b.number)
+                self._pocket(b)
                 return
         e = self.restitution_cushion
         if b.x < r:
@@ -306,15 +457,41 @@ class World:
                 b.vx += jimp * inv_b * nx
                 b.vy += jimp * inv_b * ny
 
+                # --- tangential (friction) impulse: throw + spin transfer -----
+                # t = z x n. The surface speed at the equator is v +- wz*r*t, so
+                # side spin shows up directly in the relative tangential
+                # velocity -- this is what makes a cut shot "throw" the object
+                # ball off the pure 90-degree line.
+                tx, ty = -ny, nx
+                vt = (rvx * tx + rvy * ty) - a.radius * (a.wz + b.wz)
+                inv_t = 1.0 / ((1.0 + INV_RATIO) * (inv_a + inv_b))
+                jt = vt * inv_t
+                jmax = BALL_FRICTION * jimp
+                jt = -jmax if jt < -jmax else (jmax if jt > jmax else jt)
+                a.vx += jt * inv_a * tx
+                a.vy += jt * inv_a * ty
+                b.vx -= jt * inv_b * tx
+                b.vy -= jt * inv_b * ty
+                # d(wz) = r*jt / I with I = 2/5 m r^2  ->  2.5*jt/(m r)
+                a.wz += (INV_RATIO * jt * inv_a) / a.radius
+                b.wz += (INV_RATIO * jt * inv_b) / b.radius
+
+    def _pocket(self, b: Ball) -> None:
+        """A pocketed ball carries nothing onward: no travel, no spin."""
+        b.pocketed = True
+        b.vx = 0.0
+        b.vy = 0.0
+        b.wx = 0.0
+        b.wy = 0.0
+        b.wz = 0.0
+        self.pocketed_this_shot.append(b.number)
+
     def _check_pockets(self, b: Ball) -> bool:
         # segment-based capture: test the swept path (prev->cur) against each
         # pocket so fast balls can't tunnel past a tight pocket mouth.
         for px, py in self.pockets:
             if _point_seg_dist(px, py, b.px, b.py, b.x, b.y) < self.capture_radius:
-                b.pocketed = True
-                b.vx = 0.0
-                b.vy = 0.0
-                self.pocketed_this_shot.append(b.number)
+                self._pocket(b)
                 return True
         return False
 
@@ -355,11 +532,57 @@ class World:
                 b.vy -= (1.0 + e) * vn * ny
                 self._touched_rail(b)
 
+                # Friction on the rubber: this is what turns side spin into a
+                # change of rebound angle ("the rail grabbed it") instead of a
+                # cosmetic effect.
+                #
+                # The impulse OPPOSES the slip at the contact patch, so it is
+                # negative. Getting that sign wrong is not a subtle error: the
+                # rail then pushes the ball along itself, so a 45-degree bank
+                # leaves at 61 degrees and the ball gains speed it never had.
+                # See docs/REA_findings.md 12.4.
+                m = b.mass
+                tx, ty = -ny, nx
+                vt = b.vx * tx + b.vy * ty - r * b.wz
+                jn = (1.0 + e) * (-vn) * m
+                jt = -(m * vt) / (1.0 + INV_RATIO)
+                jmax = CUSHION_FRICTION * jn
+                jt = -jmax if jt < -jmax else (jmax if jt > jmax else jt)
+                b.vx += (jt / m) * tx
+                b.vy += (jt / m) * ty
+                b.wz -= (INV_RATIO * jt) / (m * r)
+
     # -- shots -------------------------------------------------------------
-    def shoot(self, ball: Ball, angle: float, speed: float) -> None:
-        """Launch a ball at `angle` (radians) with initial `speed` (u/s)."""
-        ball.vx = math.cos(angle) * speed
-        ball.vy = math.sin(angle) * speed
+    def shoot(self, ball: Ball, angle: float, speed: float,
+              spin: Optional[Tuple[float, float]] = None) -> None:
+        """Strike a ball at `angle` (radians) with initial `speed` (u/s).
+
+        `spin` is the tip offset on the ball face, in units of the ball radius:
+          spin[0] < 0 = left english, > 0 = right english
+          spin[1] < 0 = draw (below centre), > 0 = follow (above centre)
+
+        A cue strike at height h*r above the centre of mass gives
+            w = 2.5 * h * v / r
+        (impulse through the centre: v = J/m, w = h*r*J / (2/5 m r^2)). So a
+        dead-centre hit leaves NO spin: the ball skids, and the cloth rolls it
+        up. Natural roll needs h = 0.4, and the tip can only reach about half a
+        radius from centre without miscueing, hence SPIN_ZONE.
+
+        The spin is a real angular velocity, not a cosmetic offset, which is why
+        the cloth friction above turns a draw shot into a ball that comes back.
+        """
+        sx = spin[0] if spin else 0.0
+        sy = spin[1] if spin else SPIN_DEFAULT
+        ux, uy = math.cos(angle), math.sin(angle)
+        ball.vx = ux * speed
+        ball.vy = uy * speed
+
+        r = ball.radius
+        hgt = max(-1.0, min(1.0, sy)) * SPIN_ZONE
+        roll = 2.5 * hgt                     # 1.0 = pure rolling
+        ball.wx = -(speed / r) * roll * uy
+        ball.wy = (speed / r) * roll * ux
+        ball.wz = (sx * speed * 0.55) / r    # surface speed ~55% of cue speed
 
     # -- helpers for AI / rendering ---------------------------------------
     def clone(self) -> "World":
@@ -368,6 +591,10 @@ class World:
                   self.restitution_ball, self.restitution_cushion,
                   self.damping, self.sleep_speed)
         w.balls = [b.clone() for b in self.balls]
+        # A clone is the bot's scratch world: it is simulated thousands of times
+        # per shot and never drawn, so tracking the printed surface there would
+        # cost time for nothing.
+        w.track_orientation = False
         return w
 
     def active_balls(self) -> List[Ball]:

@@ -20,7 +20,7 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional, Tuple
 
-from physics import Ball, make_8ball_world
+from physics import Ball, make_8ball_world, rack_orientation
 
 SOLIDS = list(range(1, 8))        # 1-7
 STRIPES = list(range(9, 16))      # 9-15
@@ -65,6 +65,7 @@ class EightBallGame:
                 kind = ("solid" if num in SOLIDS else
                         "stripe" if num in STRIPES else "eight")
                 b = Ball(x, y, r, number=num, kind=kind)
+                b.q = rack_orientation(num)
                 w.add_ball(b)
                 idx += 1
         # cue ball
@@ -154,24 +155,27 @@ class EightBallGame:
         cue.x, cue.y = x, y
         cue.pocketed = False
         cue.vx = cue.vy = 0.0
+        cue.wx = cue.wy = cue.wz = 0.0
         return True
 
-    def take_shot(self, angle: float, power: float) -> dict:
+    def take_shot(self, angle: float, power: float,
+                  spin: Optional[Tuple[float, float]] = None) -> dict:
         """Headless: launch, fully simulate, then evaluate the shot."""
         if self.winner is not None:
             return {"error": "game over"}
         cue = self.cue()
         if cue is None:
             return {"error": "cue not on table — place it first"}
-        self.launch(angle, power)
+        self.launch(angle, power, spin)
         self.world.simulate()
         return self.resolve_shot()
 
-    def launch(self, angle: float, power: float) -> None:
+    def launch(self, angle: float, power: float,
+               spin: Optional[Tuple[float, float]] = None) -> None:
         """Set the cue ball in motion (no simulation yet — UI steps it)."""
         cue = self.cue()
         self.world.begin_shot()
-        self.world.shoot(cue, angle, power)
+        self.world.shoot(cue, angle, power, spin)
 
     def resolve_shot(self) -> dict:
         """Evaluate the shot that has already been simulated."""
@@ -302,3 +306,4 @@ class EightBallGame:
         cue.x, cue.y = x, y
         cue.pocketed = False
         cue.vx = cue.vy = 0.0
+        cue.wx = cue.wy = cue.wz = 0.0

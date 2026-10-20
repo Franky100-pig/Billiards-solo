@@ -13,7 +13,7 @@ simplified but playable).
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from physics import (Ball, make_snooker_world,
                      SNOOKER_BAULK_X, SNOOKER_D_RADIUS,
@@ -149,22 +149,25 @@ class SnookerGame:
         cue.x, cue.y = x, y
         cue.pocketed = False
         cue.vx = cue.vy = 0.0
+        cue.wx = cue.wy = cue.wz = 0.0
         return True
 
-    def take_shot(self, angle: float, power: float) -> dict:
+    def take_shot(self, angle: float, power: float,
+                  spin: Optional[Tuple[float, float]] = None) -> dict:
         if self.winner is not None:
             return {"error": "frame over"}
         cue = self.cue()
         if cue is None:
             return {"error": "cue not on table — place it first"}
-        self.launch(angle, power)
+        self.launch(angle, power, spin)
         self.world.simulate()
         return self.resolve_shot()
 
-    def launch(self, angle: float, power: float) -> None:
+    def launch(self, angle: float, power: float,
+               spin: Optional[Tuple[float, float]] = None) -> None:
         cue = self.cue()
         self.world.begin_shot()
-        self.world.shoot(cue, angle, power)
+        self.world.shoot(cue, angle, power, spin)
 
     def resolve_shot(self) -> dict:
         result = self._evaluate()
@@ -332,6 +335,7 @@ class SnookerGame:
         cue.x, cue.y = x, y
         cue.pocketed = False
         cue.vx = cue.vy = 0.0
+        cue.wx = cue.wy = cue.wz = 0.0
 
     def _end_frame(self) -> None:
         # frame ends when black is potted and all colours down
