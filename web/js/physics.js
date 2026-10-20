@@ -488,11 +488,16 @@ class World {
 
       // Friction on the rubber: this is what turns side spin into a change of
       // rebound angle ("the rail grabbed it") instead of a cosmetic effect.
+      //
+      // The impulse OPPOSES the slip at the contact patch, so it is negative.
+      // Getting that sign wrong is not a subtle error: the rail then pushes the
+      // ball along itself, so a 45-degree bank leaves at 61 degrees and the
+      // ball gains speed it never had. Measured, see docs/REA_findings.md 12.4.
       const m = b.mass;
       const tx = -ny, ty = nx;
       const vt = b.vx * tx + b.vy * ty - r * b.wz;
       const jn = (1.0 + e) * (-vn) * m;
-      let jt = (m * vt) / (1.0 + INV_RATIO);
+      let jt = -(m * vt) / (1.0 + INV_RATIO);
       const jmax = CUSHION_FRICTION * jn;
       if (jt > jmax) jt = jmax;
       else if (jt < -jmax) jt = -jmax;
