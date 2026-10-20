@@ -137,6 +137,22 @@ function _qIntegrate(q, wx, wy, wz, h) {
   ]);
 }
 
+/**
+ * A deterministic orientation for ball `n` as it comes out of the rack.
+ *
+ * It makes no difference to the mechanics, but it makes a visible one: a rack
+ * where every ball starts at the same orientation shows every stripe's white
+ * pole to the camera, so seven of the balls look like spare cue balls. This
+ * spreads them from the ball number, which keeps the rack reproducible.
+ */
+function _rackOrientation(n) {
+  const ax = 0.9 * n, ay = 1.7 * n, az = 2.3 * n;
+  const qx = [Math.cos(ax / 2.0), Math.sin(ax / 2.0), 0.0, 0.0];
+  const qy = [Math.cos(ay / 2.0), 0.0, Math.sin(ay / 2.0), 0.0];
+  const qz = [Math.cos(az / 2.0), 0.0, 0.0, Math.sin(az / 2.0)];
+  return _qNormalise(_qMul(_qMul(qz, qy), qx));
+}
+
 // --- Ball ----------------------------------------------------------------
 class Ball {
   constructor(x, y, radius, mass = MASS, number = 0, kind = "object") {

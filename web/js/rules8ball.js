@@ -46,6 +46,7 @@ class EightBallGame {
         const kind = (SOLIDS.includes(num) ? "solid"
           : STRIPES.includes(num) ? "stripe" : "eight");
         const b = new Ball(x, y, r, MASS, num, kind);
+        b.q = _rackOrientation(num);
         w.addBall(b);
         idx++;
       }
