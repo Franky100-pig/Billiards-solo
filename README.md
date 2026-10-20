@@ -128,6 +128,14 @@ for the break:
 
 ![desktop break placement](docs/screenshots/break_line_desktop.png)
 
+The physics port is the whole model, not a simplified one: the pygame build has the same angular momentum,
+cloth slip, throw, spin-bent cushions and the corrected cushion friction below, and the same two quaternion
+driven prints on every ball. Spin is set with the keyboard instead of a dial — **↑ / ↓** follow and draw,
+**← / →** english, **C** back to dead centre, **N** back to the default — and the cue-ball face in the corner
+shows where the tip would land:
+
+![desktop rolling print](docs/screenshots/rolling_desktop.png)
+
 ## Layout
 
 ```
@@ -305,6 +313,11 @@ The JavaScript port surfaced three genuine bugs that also affected the Python bu
   foreshortening floor came from.
 - **Pygame build (same rules)** — the identical scenarios run against `src/`: head string, refusal message,
   and both the soft and the hard stroke, plus a headless `SDL_VIDEODRIVER=dummy` render of the break frame.
+  Porting the rolling model over to it added the same cushion cases (45° bank, passivity, opposite side-spin
+  deflection) and a **print sweep**: every ball at 288 orientations, checking that no ink lands outside the
+  silhouette. The first port failed it at 1.068 r, because it sized the numeral by its ink box instead of the
+  font's em box; sizing by em (as Canvas does) brings the worst case back to 0.997 r, i.e. the outline.
+  Rendering 16 balls costs 1.8 ms/frame and a physics substep 0.13 ms.
 - Screenshots above are real renders captured with headless Chrome.
 
 The bot search is a **generator** that is drained in ~7 ms slices per frame, so choosing a shot never freezes
