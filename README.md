@@ -265,12 +265,15 @@ The JavaScript port surfaced three genuine bugs that also affected the Python bu
 
 ## Verification
 
-- **Physics & logic (Node, headless): 46/46** — the table settles; rolling advances exactly with travel; a
+- **Physics & logic (Node, headless): 49/49** — the table settles; rolling advances exactly with travel; a
   full 8-ball frame completes; **no ball ever leaves the table**; the bot's strokes stay inside the power
   envelope and average well below the cap; snooker reds decrement consistently; colours pot in ascending
   order. Plus the new mechanics: a back-spin stroke **draws back**, a top-spin stroke **follows through**, a
   stun stops dead, side spin **throws** the object ball off line and **bends** the cushion rebound, and a
-  coasting ball's speed follows `v₀·e^(−0.45 t)` to within a few per cent.
+  coasting ball's speed follows `v₀·e^(−0.45 t)` to within a few per cent. The cushion has its own three
+  cases, because a head-on bank cannot tell a correct rail from one that pushes the ball along itself: a
+  45-degree bank returns within 8 degrees of 45, the rail **never returns more speed than the passive
+  mirror allows**, and side spin bends the bank in opposite directions by more than 4 degrees.
 - **Position play & escapes (Node, headless): 6/6** — a deliberately snookered cue finds a one-rail kick that
   contacts the ball on, stays on the table, and the 8-ball / snooker frames still finish.
 - **UI wiring (headless DOM/Canvas): 79/79** — menu → start → place → aim → pull → strike → resolve → bot
