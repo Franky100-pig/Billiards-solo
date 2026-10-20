@@ -12,6 +12,8 @@ Controls:
   - Power: press the left button to lock that direction, then drag BACK along
     the cue line and release. Only the backward component counts, so loading
     power can never change the aim.
+  - Spin: ↑/↓ move the tip up (follow) or down (draw), ←/→ add english, C puts
+    it back to dead centre. The cue-ball face in the corner shows the offset.
   - R: return to the menu (restart) after a frame ends.
 """
 
@@ -22,7 +24,8 @@ import sys
 
 import pygame
 
-from physics import Ball, SNOOKER_BAULK_X, SNOOKER_D_RADIUS
+from physics import (Ball, SNOOKER_BAULK_X, SNOOKER_D_RADIUS,
+                     q_rotate, SPIN_DEFAULT, SPIN_ZONE)
 from rules_eightball import EightBallGame
 from rules_snooker import SnookerGame
 import bot as botmod
@@ -39,6 +42,18 @@ SUBSTEPS_PER_FRAME = 16        # ~5760 substeps/sec -> shots resolve in ~1-3 s
 MAX_LAUNCH = 2000.0           # u/s at full pull
 MIN_LAUNCH = 160.0
 MAX_DRAG = 230.0              # px of pull for full power
+
+# Printed features, as the cosine of the half-angle of the cap they occupy.
+# A solid ball prints its number on a white patch this big at each pole; a
+# stripe ball has white poles of the same size and the colour band is what is
+# left between them.
+BAND_COS = 0.62
+PATCH_COS = 0.88
+NUMERAL_MIN_FACING = 0.30     # drop the numeral before it becomes a sliver
+NUMERAL_FADE = 0.20
+NUMERAL_MIN_SQUASH = 0.60     # never squash a glyph past 1:1.7
+NUMERAL_BASE_PX = 72          # the size the glyph metrics are measured at
+NUMERAL_SUPERSAMPLE = 4       # glyphs are turned at 4x and averaged down
 
 # 8-ball colours (number -> rgb), 9-15 reuse 1-7 as stripes
 EIGHT_COLORS = {
@@ -78,6 +93,13 @@ class App:
         self.font = pygame.font.SysFont("dejavusans", 20)
         self.small = pygame.font.SysFont("dejavusans", 15)
         self.big = pygame.font.SysFont("dejavusans", 30)
+        # big, bold, and rendered once per number: the ball numerals are scaled
+        # down from this, so starting small would just look blurry
+        self.numfont = pygame.font.SysFont("dejavusans", NUMERAL_BASE_PX, bold=True)
+        self._glyphs = {}          # (number, font px) -> ink-trimmed glyph
+        self._glyph_metrics = {}   # number -> (ink width, ink height) per em
+        self._shades = {}          # ball px radius -> shading overlay
+        self._shadows = {}         # ball px radius -> contact shadow
 
         self.mode = "8ball"          # selected in menu
         self.difficulty = "medium"
@@ -101,6 +123,11 @@ class App:
         self.bot_think_frames = 0
         self.aim_angle = 0.0
         self.power = 0.0
+        # Tip offset on the cue ball face, in ball radii: [english, follow].
+        # follow < 0 is draw, > 0 is follow; english < 0 is left, > 0 is right.
+        # Arrows move it; it persists between shots the way a real cueing
+        # habit does, and the default matches the web build's dial.
+        self.spin = [0.0, SPIN_DEFAULT]
 
         # menu button rects
         self._build_menu()
@@ -220,11 +247,40 @@ class App:
         cue = self.game.cue()
         if cue is None:
             return
-        self.game.launch(self.aim_angle, self.power)
+        self.game.launch(self.aim_angle, self.power, (self.spin[0], self.spin[1]))
         self.simulating = True
 
     def _human_turn(self):
         return self.game.current == 0
+
+    def adjust_spin(self, key):
+        """Move the tip offset on the cue-ball face.
+
+        Only the human can do this: the bot's stroke is chosen by its search, and
+        the web build's bot lets the shot default handle spin too.
+        """
+        step = 0.12
+        if key == pygame.K_UP:
+            self.spin[1] = min(1.0, self.spin[1] + step)      # follow
+        elif key == pygame.K_DOWN:
+            self.spin[1] = max(-1.0, self.spin[1] - step)     # draw
+        elif key == pygame.K_LEFT:
+            self.spin[0] = max(-1.0, self.spin[0] - step)     # left english
+        elif key == pygame.K_RIGHT:
+            self.spin[0] = min(1.0, self.spin[0] + step)      # right english
+        elif key in (pygame.K_c, pygame.K_KP5):
+            self.spin = [0.0, 0.0]                            # dead centre
+        elif key == pygame.K_n:
+            self.spin = [0.0, SPIN_DEFAULT]
+
+    def spin_label(self):
+        eng, fol = self.spin
+        if abs(eng) < 0.06 and abs(fol) < 0.06:
+            return "centre"
+        if abs(eng) < 0.06:
+            return f"follow {fol:+.2f}" if fol > 0 else f"draw {fol:+.2f}"
+        side = "right" if eng > 0 else "left"
+        return f"{side} {abs(eng):.2f}, {fol:+.2f}"
 
     def update_pull(self):
         # aiming happens on hover, not on drag: the direction is settled first
@@ -300,6 +356,8 @@ class App:
                         self.phase = "menu"
                     elif event.key == pygame.K_ESCAPE:
                         self.phase = "menu"
+                    elif self.phase == "play" and not self.simulating:
+                        self.adjust_spin(event.key)
 
             self.update_pull()
 
@@ -360,7 +418,12 @@ class App:
             self.screen.blit(t, (r.centerx - t.get_width() / 2, r.centery - 10))
         hint = self.small.render("Click a game mode to start.  (R = menu, Esc = menu)",
                                  True, (150, 155, 165))
-        self.screen.blit(hint, (WIN_W / 2 - hint.get_width() / 2, 470))
+        self.screen.blit(hint, (WIN_W / 2 - hint.get_width() / 2, 460))
+        keys = self.small.render(
+            "Aim with the mouse · pull back to load power · "
+            "↑↓ follow/draw, ←→ english, C = centre",
+            True, (150, 155, 165))
+        self.screen.blit(keys, (WIN_W / 2 - keys.get_width() / 2, 484))
 
     def _render_table(self):
         g = self.game
@@ -403,26 +466,302 @@ class App:
             pygame.draw.circle(self.screen, (8, 8, 8), (int(sx), int(sy)), int(pr))
 
     def _render_balls(self):
-        g = self.game
-        for b in g.world.balls:
+        for b in self.game.world.balls:
             if b.pocketed:
                 continue
             sx, sy = self.w2s(b.x, b.y)
-            r = max(4, b.radius * self.scale)
-            fill, stripe = ball_color(b, self.snooker)
-            pygame.draw.circle(self.screen, fill, (int(sx), int(sy)), int(r))
-            if stripe:
-                # draw a white band to mark a stripe ball (top-down look)
-                pygame.draw.rect(self.screen, (235, 235, 235),
-                                 pygame.Rect(sx - r, sy - r * 0.32, 2 * r, r * 0.64))
-                pygame.draw.circle(self.screen, fill, (int(sx), int(sy)), int(r))
-                pygame.draw.circle(self.screen, fill, (int(sx), int(sy)), int(r * 0.62))
-            pygame.draw.circle(self.screen, (0, 0, 0), (int(sx), int(sy)), int(r), 1)
-            # number label for 8-ball (skip cue)
-            if not self.snooker and b.kind != "cue":
-                lbl = self.small.render(str(b.number), True, (20, 20, 20)
-                                       if b.number != 8 else (235, 235, 235))
-                self.screen.blit(lbl, (sx - lbl.get_width() / 2, sy - 8))
+            self._draw_ball(b, sx, sy, max(4.0, b.radius * self.scale))
+
+    def _draw_ball(self, b, sx, sy, r):
+        """Draw one ball at a screen position and pixel radius.
+
+        Split out from the loop so a still or a test can ask for a ball at any
+        size without a whole table around it.
+        """
+        fill, stripe = ball_color(b, self.snooker)
+
+        # The orientation the physics actually turned through.
+        axis = q_rotate(b.q, (0.0, 0.0, 1.0))
+        e1 = q_rotate(b.q, (1.0, 0.0, 0.0))
+        e2 = q_rotate(b.q, (0.0, 1.0, 0.0))
+
+        # Contact shadow first, so nothing has to be drawn under the ball.
+        sh = self._shadow(r)
+        self.screen.blit(sh, (sx + 0.20 * r - sh.get_width() / 2.0,
+                              sy + 0.34 * r - sh.get_height() / 2.0))
+
+        pygame.draw.circle(self.screen, fill, (int(sx), int(sy)), int(r))
+        if not self.snooker:
+            # A printed feature (number patch on a solid, white poles on a
+            # stripe) is the visible part of a spherical cap; painting it this
+            # way is what makes the printing wrap and vanish over the edge
+            # instead of being a sticker dragged along.
+            cos_r = BAND_COS if stripe else PATCH_COS
+            white = (236, 236, 236) if stripe else (244, 244, 244)
+            self._ball_cap(sx, sy, r, axis, e1, e2, cos_r, white)
+            self._ball_cap(sx, sy, r,
+                           (-axis[0], -axis[1], -axis[2]),
+                           (-e1[0], -e1[1], -e1[2]), e2, cos_r, white)
+        else:
+            self._rolling_sheen(sx, sy, r, axis)
+
+        # A flat disc reads as a sticker no matter what is printed on it: the
+        # shading (highlight upper-left, terminator lower-right) is what makes
+        # the printing look like it is on a sphere.
+        self.screen.blit(self._shade(r), (sx - r - 1, sy - r - 1))
+
+        pygame.draw.circle(self.screen, (0, 0, 0), (int(sx), int(sy)), int(r), 1)
+
+        if not self.snooker and b.kind != "cue" and b.number:
+            cos_r = BAND_COS if stripe else PATCH_COS
+            k = (1.42 if stripe else 1.75) * (0.76 if b.number >= 10 else 1.0)
+            self._numeral(b.number, sx, sy, r, axis, e1, e2, cos_r, k)
+            # real balls print the number at both ends; the far one needs its
+            # own right-handed frame or it comes out mirror-imaged
+            self._numeral(b.number, sx, sy, r,
+                          (-axis[0], -axis[1], -axis[2]),
+                          (-e1[0], -e1[1], -e1[2]), e2, cos_r, k)
+
+    def _shadow(self, r):
+        """The soft contact shadow under a ball, cached per pixel radius.
+
+        Same ellipse the web build uses (offset a fifth of a radius right and a
+        third down, slightly wider than the ball) because the ball sits in the
+        cloth, not on it: without it every ball looks pasted on.
+        """
+        key = int(round(r))
+        surf = self._shadows.get(key)
+        if surf is not None:
+            return surf
+        w = max(4, int(round(r * 2.6)))
+        h = max(4, int(round(r * 1.9)))
+        surf = pygame.Surface((w, h), pygame.SRCALPHA)
+        # three passes, widest and faintest last: a cheap soft edge
+        for grow, alpha in ((0.0, 50), (0.10, 26), (0.20, 12)):
+            rw = int(round(r * 0.96 * (1.0 + grow)))
+            rh = int(round(r * 0.70 * (1.0 + grow)))
+            pygame.draw.ellipse(surf, (0, 0, 0, alpha),
+                                pygame.Rect(w / 2 - rw, h / 2 - rh, rw * 2, rh * 2))
+        self._shadows[key] = surf
+        return surf
+
+    def _shade(self, r):
+        """Radial shading overlay for a ball of pixel radius r, cached.
+
+        Per-pixel rather than a stack of translucent circles: the gradient has
+        to be smooth at a 12 px radius, where banding on a stack shows up as
+        rings. One surface per radius, reused by every ball of that size.
+        """
+        key = int(round(r))
+        surf = self._shades.get(key)
+        if surf is not None:
+            return surf
+        w = int(round(r)) * 2 + 2
+        surf = pygame.Surface((w, w), pygame.SRCALPHA)
+        # highlight centre, upper-left; distance 1.0 at the far side of the ball
+        hx, hy = w / 2.0 - 0.35 * r, w / 2.0 - 0.35 * r
+        span = 1.45 * r
+        for y in range(w):
+            dy = y + 0.5 - w / 2.0
+            for x in range(w):
+                dx = x + 0.5 - w / 2.0
+                if dx * dx + dy * dy > r * r:
+                    continue
+                t = min(1.0, math.hypot(x + 0.5 - hx, y + 0.5 - hy) / span)
+                white = 0.38 * (1.0 - t / 0.32) if t < 0.32 else 0.0
+                black = 0.22 * min(1.0, max(0.0, (t - 0.45) / 0.55))
+                if white > 0.0:
+                    surf.set_at((x, y), (255, 255, 255, int(255 * white)))
+                elif black > 0.0:
+                    surf.set_at((x, y), (0, 0, 0, int(255 * black)))
+        self._shades[key] = surf
+        return surf
+
+    def _ball_cap(self, sx, sy, r, axis, e1, e2, cos_r, colour):
+        """Fill the visible part of one spherical cap on the ball.
+
+        The feature is the set of surface points n.a >= c, so its rim is a
+        circle on the sphere. On screen that rim is an ellipse, and the part of
+        it that is in view has to be closed along the ball's silhouette -- along
+        the limb, on the side the cap is on. Getting the closing direction wrong
+        encloses the whole ball instead.
+        """
+        sin_r = math.sqrt(max(0.0, 1.0 - cos_r * cos_r))
+        axy = math.hypot(axis[0], axis[1])
+        if cos_r * axis[2] + sin_r * axy <= 0.0:
+            return                            # nothing of this cap is in view
+
+        tau = math.pi * 2.0
+        n = 48
+        # One pass over the rim: the same samples are needed to find where it
+        # goes behind the ball and to walk the visible arc.
+        rx = [0.0] * n
+        ry = [0.0] * n
+        rz = [0.0] * n
+        for i in range(n):
+            t = (i / n) * tau
+            ct = math.cos(t) * sin_r
+            st = math.sin(t) * sin_r
+            rx[i] = cos_r * axis[0] + ct * e1[0] + st * e2[0]
+            ry[i] = cos_r * axis[1] + ct * e1[1] + st * e2[1]
+            rz[i] = cos_r * axis[2] + ct * e1[2] + st * e2[2]
+
+        hidden = -1
+        for i in range(n):
+            if rz[i] < 0.0:
+                hidden = i
+                break
+
+        if hidden < 0:
+            pts = [(rx[i], ry[i]) for i in range(n)]
+        else:
+            start = -1
+            for k in range(1, n + 1):
+                i = (hidden + k) % n
+                if rz[i] >= 0.0:
+                    start = i
+                    break
+            if start < 0:
+                return                        # wholly behind the ball
+            pts = []
+            for k in range(n):
+                i = (start + k) % n
+                if rz[i] < 0.0:
+                    break
+                pts.append((rx[i], ry[i]))
+            if not pts:
+                return
+
+            def norm(x):
+                return ((x % tau) + tau) % tau
+
+            a0 = math.atan2(pts[0][1], pts[0][0])
+            a1 = math.atan2(pts[-1][1], pts[-1][0])
+            ap = math.atan2(axis[1], axis[0])
+            sweep = norm(a0 - a1)
+            mid = norm(a1 + sweep * 0.5)
+            apart = abs(((norm(ap - mid) + math.pi) % tau) - math.pi)
+            if apart > math.pi / 2:
+                sweep -= tau                  # sweep the other way round
+            steps = max(4, int(round(abs(sweep) / tau * n)))
+            for i in range(1, steps):
+                ang = a1 + sweep * (i / steps)
+                pts.append((math.cos(ang), math.sin(ang)))
+
+        if len(pts) >= 3:
+            poly = [(sx + px * r, sy + py * r) for px, py in pts]
+            pygame.draw.polygon(self.screen, colour, poly)
+
+    def _rolling_sheen(self, sx, sy, r, axis):
+        """Snooker balls carry no printing, so the only readable cue that they
+        are turning is a highlight that rides the surface."""
+        facing = axis[2]
+        if facing <= 0.05:
+            return
+        off = 0.42 * r * math.sqrt(max(0.0, 1.0 - facing * facing))
+        hx = sx + axis[0] * off
+        hy = sy + axis[1] * off
+        rad = max(1, int(r * (0.16 + 0.16 * facing)))
+        sheen = pygame.Surface((rad * 2 + 2, rad * 2 + 2), pygame.SRCALPHA)
+        pygame.draw.circle(sheen, (255, 255, 255, int(120 * facing)),
+                           (rad + 1, rad + 1), rad)
+        self.screen.blit(sheen, (hx - rad - 1, hy - rad - 1))
+
+    def _numeral(self, number, sx, sy, r, axis, e1, e2, cos_r, k):
+        """Print the numeral in the patch's own tangent frame.
+
+        The glyph therefore foreshortens and turns with the surface. Two
+        concessions, both measured on the web build: a patch that has gone
+        edge-on is dropped rather than drawn as a sliver (a squeezed '8' reads
+        as '0'), and the foreshortening is clamped so the letterform survives.
+        """
+        facing = axis[2]
+        if facing < NUMERAL_MIN_FACING:
+            return
+        sin_r = math.sqrt(max(0.0, 1.0 - cos_r * cos_r))
+        cx = sx + cos_r * axis[0] * r
+        cy = sy + cos_r * axis[1] * r
+
+        lu = math.hypot(e1[0], e1[1]) or 1.0
+        lv = math.hypot(e2[0], e2[1]) or 1.0
+        hi = max(lu, lv)
+        su, sv = lu, lv
+        if min(lu, lv) < hi * NUMERAL_MIN_SQUASH:
+            if lu <= lv:
+                su = hi * NUMERAL_MIN_SQUASH
+            else:
+                sv = hi * NUMERAL_MIN_SQUASH
+
+        # The web build sets a font in ball-radius units and lets the tangent
+        # frame scale it, so px/py describe the EM BOX, not the ink. Sizing the
+        # ink box to px/py instead — what the first port did — drew every digit
+        # about 40% oversized, which is why a number on a turned ball spilled
+        # off the silhouette and over the felt.
+        em = 0.95 * sin_r * k * r
+        rw, rh = self._glyph_ratios(number)
+        px = em * su * rw
+        py = em * sv * rh
+        if px < 3.0 or py < 4.0:
+            return
+
+        # Render at (close to) the final ink height so the glyph is hinted at
+        # the size it is shown at. Downscaling the 72 px master straight to nine
+        # pixels turned "8" into a blurry ring and "12" into "(2".
+        #
+        # The rotation is done at NUMERAL_SUPERSAMPLE times the final size: a
+        # nine-pixel glyph cannot survive rotate(), which resamples with nearest
+        # neighbour and turns a "4" into a blob at anything past twenty degrees.
+        glyph = self._glyph(number, NUMERAL_SUPERSAMPLE * py / rh if rh else py)
+        w = max(1, int(round(px * NUMERAL_SUPERSAMPLE)))
+        h = max(1, int(round(py * NUMERAL_SUPERSAMPLE)))
+        big = pygame.transform.smoothscale(glyph, (w, h))
+        side = int(math.hypot(w, h)) + 2
+        canvas = pygame.Surface((side, side), pygame.SRCALPHA)
+        canvas.blit(big, ((side - w) // 2, (side - h) // 2))
+        # pygame rotates counter-clockwise in screen coordinates, so the angle
+        # is negated: local +x has to land on the projected e1 direction
+        canvas = pygame.transform.rotozoom(
+            canvas, -math.degrees(math.atan2(e1[1], e1[0])), 1.0)
+        # divide by the supersample factor, not by the pre-rotation side: the
+        # rotated canvas is bigger than the square it came from, and scaling to
+        # a fixed size would shrink the glyph more the further it is turned
+        out = max(2, int(round(canvas.get_width() / float(NUMERAL_SUPERSAMPLE))))
+        surf = pygame.transform.smoothscale(canvas, (out, out))
+        surf.set_alpha(int(255 * min(1.0, (facing - NUMERAL_MIN_FACING) / NUMERAL_FADE)))
+        self.screen.blit(surf, (cx - surf.get_width() / 2.0,
+                                cy - surf.get_height() / 2.0))
+
+    def _glyph(self, number, font_px=NUMERAL_BASE_PX):
+        """One number's glyph, ink-trimmed, rendered at about font_px tall.
+
+        Cached per size: a numeral is asked for at whatever the ball's
+        foreshortening works out to, which is a handful of distinct sizes.
+        """
+        size = max(6, int(round(font_px)))
+        key = (number, size)
+        surf = self._glyphs.get(key)
+        if surf is None:
+            font = (self.numfont if size == NUMERAL_BASE_PX
+                    else pygame.font.SysFont("dejavusans", size, bold=True))
+            base = font.render(str(number), True, (22, 22, 22))
+            # Crop to the ink: the font box carries padding above and below the
+            # digit, and scaling the box rather than the glyph is why the first
+            # attempt printed numbers that were small and spilling out of the
+            # patch at once.
+            ink = base.get_bounding_rect()
+            surf = base.subsurface(ink).copy() if ink.width and ink.height else base
+            self._glyphs[key] = surf
+        return surf
+
+    def _glyph_ratios(self, number):
+        """(ink width, ink height) of a number, per unit of font size."""
+        got = self._glyph_metrics.get(number)
+        if got is None:
+            g = self._glyph(number, NUMERAL_BASE_PX)
+            got = (g.get_width() / float(NUMERAL_BASE_PX),
+                   g.get_height() / float(NUMERAL_BASE_PX))
+            self._glyph_metrics[number] = got
+        return got
 
     def _render_aim(self):
         g = self.game
@@ -483,6 +822,32 @@ class App:
             msg = f"{who} — {g.message}"
         mt = self.small.render(msg, True, (200, 205, 215))
         self.screen.blit(mt, (20, HUD_TOP + 8))
+        self._render_spin_widget()
+
+    def _render_spin_widget(self):
+        """The cue-ball face in the corner: where the tip would strike it.
+
+        Without this the spin control is invisible and draw/follow look like
+        the ball misbehaving, so it is drawn whenever the human can shoot.
+        """
+        if self.phase != "play" or not self._human_turn() or self.simulating:
+            return
+        cx = WIN_W - 48
+        cy = WIN_H - HUD_BOTTOM / 2.0 + 6
+        rr = 16
+        pygame.draw.circle(self.screen, (238, 238, 234), (int(cx), int(cy)), rr)
+        pygame.draw.line(self.screen, (196, 196, 196),
+                         (cx - rr, cy), (cx + rr, cy), 1)
+        pygame.draw.line(self.screen, (196, 196, 196),
+                         (cx, cy - rr), (cx, cy + rr), 1)
+        pygame.draw.circle(self.screen, (0, 0, 0), (int(cx), int(cy)), rr, 1)
+        # the tip can only reach SPIN_ZONE of the radius before it miscues, so
+        # the dot is drawn at the offset the physics will actually use
+        tx = cx + self.spin[0] * SPIN_ZONE * rr
+        ty = cy - self.spin[1] * SPIN_ZONE * rr
+        pygame.draw.circle(self.screen, (205, 62, 62), (int(tx), int(ty)), 4)
+        lbl = self.small.render(self.spin_label(), True, (200, 205, 215))
+        self.screen.blit(lbl, (cx - rr - 10 - lbl.get_width(), cy - 8))
 
     def _render_over(self):
         g = self.game
